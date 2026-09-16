@@ -40,7 +40,7 @@ $$
 $$\mathbf{C}(\theta,\dot{\theta})=
 \begin{pmatrix}
 0 & -(m_1+m_2)l_1\sin\theta_1\dot{\theta}_1 & -m_2l_2\sin\theta_2\dot{\theta}_2 \\
-0 & 0 & m_2l_1l_2\sin(\theta_1-\theta_2)\dot{\theta} \\
+0 & 0 & m_2l_1l_2\sin(\theta_1-\theta_2)\dot{\theta}_2 \\
 0 & -m_2l_1l_2\sin(\theta_1-\theta_2)\dot{\theta}_1 & 0
 \end{pmatrix}
 $$
