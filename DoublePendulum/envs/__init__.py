@@ -1,1 +1,1 @@
-from DoublePendulum.envs.grid_world import GridWorldEnv
+from DoublePendulum.envs.doublependulumworld import DoublePendulumEnv

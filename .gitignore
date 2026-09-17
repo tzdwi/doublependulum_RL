@@ -158,6 +158,7 @@ venv/
 ENV/
 env.bak/
 venv.bak/
+.cursorignore
 
 # Spyder project settings
 .spyderproject

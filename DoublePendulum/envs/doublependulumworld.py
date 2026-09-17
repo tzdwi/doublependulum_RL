@@ -1,48 +1,61 @@
-from enum import Enum
 import gymnasium as gym
 from gymnasium import spaces
+from gymnasium.error import DependencyNotInstalled
 import pygame
 import numpy as np
 
-
-class Actions(Enum):
-    right = 0
-    up = 1
-    left = 2
-    down = 3
+from ..doublependulum.doublependulum import DoublePendulum
 
 
-class GridWorldEnv(gym.Env):
-    metadata = {"render_modes": ["human", "rgb_array"], "render_fps": 4}
+class DoublePendulumEnv(gym.Env):
+    metadata = {"render_modes": ["human", "rgb_array"], "render_fps": int(1/0.03)}
+    SCREEN_DIM = 512
+    SUCCESS_TIME = 5 # We'll have won if we get the thing to stand up for 5 seconds
 
-    def __init__(self, render_mode=None, size=5):
-        self.size = size  # The size of the square grid
-        self.window_size = 512  # The size of the PyGame window
+    def __init__(self, render_mode=None, size=5, max_F=5, max_ang_vel=4*np.pi, mm=5.0, m1=1.0, l1=1.0, m2=1.0, l2=1.0, dt=0.03, atol=1e-4):
+        self.size = size  # The size of the track
+        self.max_F = max_F # maximum applied F in Neutons
+        self.max_ang_vel = max_ang_vel # we'll allow the second pendulum to go faster though 
+        self.dt = dt
+        if self.dt != 0.03:
+            self.metadata = {**self.metadata, "render_fps": int(1 / self.dt)}
+        self.max_cart_vel = self.size/self.dt/2 # can we resolve the cart's motion?
+        self.atol = atol #absolute tolerance in variance between state and target
 
-        # Observations are dictionaries with the agent's and the target's location.
-        # Each location is encoded as an element of {0, ..., `size`}^2,
-        # i.e. MultiDiscrete([size, size]).
-        self.observation_space = spaces.Dict(
-            {
-                "agent": spaces.Box(0, size - 1, shape=(2,), dtype=int),
-                "target": spaces.Box(0, size - 1, shape=(2,), dtype=int),
-            }
+        # We don't care about the position of the cart, but we do care about its velocity
+        self._target_loc = np.zeros(5) # we don't care about the location of the box
+        self._target_loc[0] = np.pi
+        self._target_loc[1] = np.pi
+
+        self.mm = mm
+        self.m1 = m1
+        self.m2 = m2
+        self.l1 = l1
+        self.l2 = l2
+
+        self.pendulum = DoublePendulum(mm=mm, m1=m1, m2=m2, l1=l1, l2=l2, dt=dt)
+        self._agent_location=0.0
+        self.state = self._get_obs()
+
+        # State variables...
+        # xm - cart position
+        # theta1 - angle of  (bounds don't matter, physical setup enforces them)
+        # theta2
+        # dxm/dt
+        # dtheta1/dt
+        # dtheta2/dt
+        # F_applied
+        high = np.array(
+            [self.size, 5*np.pi, 5*np.pi, self.max_cart_vel, self.max_ang_vel, 10*(self.m2/self.m1)*self.max_ang_vel, self.max_F], dtype=np.float64
         )
+        # Observations are dictionaries with the pendulum's state vector and agent's current applied force
+        low = -high
+        self.observation_space = spaces.Box(low=low, high=high, dtype=np.float64)
 
-        # We have 4 actions, corresponding to "right", "up", "left", "down", "right"
-        self.action_space = spaces.Discrete(4)
+        # We can either add or subtract to the current force by at most 0.5 N on either side
+        self.action_space = spaces.Box(-0.5, 0.5, shape=(1,))
 
-        """
-        The following dictionary maps abstract actions from `self.action_space` to 
-        the direction we will walk in if that action is taken.
-        i.e. 0 corresponds to "right", 1 to "up" etc.
-        """
-        self._action_to_direction = {
-            Actions.right.value: np.array([1, 0]),
-            Actions.up.value: np.array([0, 1]),
-            Actions.left.value: np.array([-1, 0]),
-            Actions.down.value: np.array([0, -1]),
-        }
+        self.success_frames = 0
 
         assert render_mode is None or render_mode in self.metadata["render_modes"]
         self.render_mode = render_mode
@@ -56,126 +69,196 @@ class GridWorldEnv(gym.Env):
         """
         self.window = None
         self.clock = None
+        self.screen = None
 
     def _get_obs(self):
-        return {"agent": self._agent_location, "target": self._target_location}
-
-    def _get_info(self):
-        return {
-            "distance": np.linalg.norm(
-                self._agent_location - self._target_location, ord=1
-            )
-        }
+        return np.append(self.pendulum.x, self._agent_location)
 
     def reset(self, seed=None, options=None):
         # We need the following line to seed self.np_random
         super().reset(seed=seed)
 
-        # Choose the agent's location uniformly at random
-        self._agent_location = self.np_random.integers(0, self.size, size=2, dtype=int)
+        # Reset the pendulum
+        self.pendulum._initialize(seed=seed)
 
-        # We will sample the target's location randomly until it does not
-        # coincide with the agent's location
-        self._target_location = self._agent_location
-        while np.array_equal(self._target_location, self._agent_location):
-            self._target_location = self.np_random.integers(
-                0, self.size, size=2, dtype=int
-            )
+        # Set agent force to 0
+        self._agent_location = 0.0
 
+        # Reset the state
         observation = self._get_obs()
-        info = self._get_info()
+        self.state = observation
+
+        info = {}
 
         if self.render_mode == "human":
-            self._render_frame()
+            self.render()
 
         return observation, info
 
     def step(self, action):
-        # Map the action (element of {0,1,2,3}) to the direction we walk in
-        direction = self._action_to_direction[action]
-        # We use `np.clip` to make sure we don't leave the grid
+        # Action will be selected from +/- 0.5
+        # Update current force, clipped to current boundaries
         self._agent_location = np.clip(
-            self._agent_location + direction, 0, self.size - 1
+            self._agent_location + action.squeeze(), -self.max_F, self.max_F
         )
-        # An episode is done iff the agent has reached the target
-        terminated = np.array_equal(self._agent_location, self._target_location)
-        reward = 1 if terminated else 0  # Binary sparse rewards
+        # Now apply the current force to the pendulum
+        self.pendulum.step(F=self._agent_location)
+
         observation = self._get_obs()
-        info = self._get_info()
+        self.state = observation
+        
+        # An episode is done iff the agent has reached the target
+        # TO DO:
+        # COUNT SUCCESSFRAMES, TERMINATE WHEN WE'VE GOTTEN
+        # TO THE MAX OR IF WE'VE FALLEN OFF THE TRACK
+        # ALSO GIVE A BAD REWARD IF WE'RE SPINNING TOO FAST
+        """terminated, oob = self._terminate_oob()
+        if terminated and not oob:
+            reward = 1000
+        elif oob:
+            reward = -10
+        else:
+            dist = self._distance()
+            norm = np.linalg.norm(dist)
+            if norm < 1:
+                power = 2.0
+            else:
+                power = 1.0
+            reward = -0.1*np.linalg.norm(dist)**power"""
+        info = {}
 
         if self.render_mode == "human":
-            self._render_frame()
+            self.render()
 
-        return observation, reward, terminated, False, info
+        return observation, reward, terminated, tuncated, info
+    
+    def _distance(self):
+        raw_dist = self.state[1:6] - self._target_loc
+        raw_dist[0] = np.atan2(np.sin(raw_dist[0]), np.cos(raw_dist[0]))
+        raw_dist[1] = np.atan2(np.sin(raw_dist[1]), np.cos(raw_dist[1]))
+        return raw_dist
+
+    def _terminate_oob(self):
+        s = self.state
+        assert s is not None, "Call reset before using DoublePendulumEnv object."
+        terminate = np.allclose(s[1:6], self._target_loc, atol=self.atol)
+        low = self.observation_space.low
+        high = self.observation_space.high
+        oob = not (np.all(s >= low) & np.all(s <= high))
+        return terminate or oob, oob
 
     def render(self):
-        if self.render_mode == "rgb_array":
-            return self._render_frame()
+        if self.render_mode is None:
+            assert self.spec is not None
+            gym.logger.warn(
+                "You are calling render method without specifying any render mode. "
+                "You can specify the render_mode at initialization, "
+                f'e.g. gym.make("{self.spec.id}", render_mode="rgb_array")'
+            )
+            return
 
-    def _render_frame(self):
-        if self.window is None and self.render_mode == "human":
-            pygame.init()
+        try:
+            import pygame
+            from pygame import gfxdraw
+        except ImportError as e:
+            raise DependencyNotInstalled(
+                'pygame is not installed, run `pip install "gymnasium[classic-control]"`'
+            ) from e
+
+        if self.screen is None:
             pygame.display.init()
-            self.window = pygame.display.set_mode((self.window_size, self.window_size))
-        if self.clock is None and self.render_mode == "human":
+            if self.render_mode == "human":
+                self.screen = pygame.display.set_mode(
+                    (self.SCREEN_DIM, self.SCREEN_DIM)
+                )
+            else:  # mode in "rgb_array"
+                self.screen = pygame.Surface((self.SCREEN_DIM, self.SCREEN_DIM))
+                
+        if self.clock is None:
             self.clock = pygame.time.Clock()
 
-        canvas = pygame.Surface((self.window_size, self.window_size))
-        canvas.fill((255, 255, 255))
-        pix_square_size = (
-            self.window_size / self.size
-        )  # The size of a single grid square in pixels
+        surf = pygame.Surface((self.SCREEN_DIM, self.SCREEN_DIM))
+        surf.fill((255, 255, 255))
+        s = self.state
+        cartesian_coords = self.pendulum.transform_cartesian()
 
-        # First we draw the target
-        pygame.draw.rect(
-            canvas,
-            (255, 0, 0),
-            pygame.Rect(
-                pix_square_size * self._target_location,
-                (pix_square_size, pix_square_size),
-            ),
-        )
-        # Now we draw the agent
-        pygame.draw.circle(
-            canvas,
-            (0, 0, 255),
-            (self._agent_location + 0.5) * pix_square_size,
-            pix_square_size / 3,
+        bound = self.l1 + self.l2 + 0.2 + self.size # 7.2 for default
+        scale = self.SCREEN_DIM / (bound * 2) # pixels/meter
+        offset = self.SCREEN_DIM / 2 # used to transform 0,0 (cartesian) to pix
+
+        if s is None:
+            return None
+
+        p0 = [cartesian_coords[0] * scale, 0.0]
+
+        p1 = [
+            cartesian_coords[1][0] * scale,
+            cartesian_coords[1][1] * scale,
+        ]
+
+        p2= [
+            cartesian_coords[2][0] * scale,
+            cartesian_coords[2][1] * scale,
+        ]
+
+        # Our "track"
+        pygame.draw.line(
+            surf,
+            start_pos=(-self.size * scale + offset, 0+offset),
+            end_pos=(self.size * scale + offset, 0+offset),
+            color=(0, 0, 0),
         )
 
-        # Finally, add some gridlines
-        for x in range(self.size + 1):
-            pygame.draw.line(
-                canvas,
-                0,
-                (0, pix_square_size * x),
-                (self.window_size, pix_square_size * x),
-                width=3,
-            )
-            pygame.draw.line(
-                canvas,
-                0,
-                (pix_square_size * x, 0),
-                (pix_square_size * x, self.window_size),
-                width=3,
-            )
+        # Pendulum links
+        pygame.draw.line(
+            surf,
+            start_pos=(p0[0] + offset, p0[1]+offset),
+            end_pos=(p1[0] + offset, p1[1]+offset),
+            color=(0, 0, 0),
+        )
+
+        pygame.draw.line(
+            surf,
+            start_pos=(p1[0] + offset, p1[1]+offset),
+            end_pos=(p2[0] + offset, p2[1]+offset),
+            color=(0, 0, 0),
+        )
+
+        # Our cart
+        l, r, t, b = int(-0.1*scale), int(0.1*scale), int(0.1*scale), int(-0.1*scale)
+        coords = [(l, b), (l, t), (r, t), (r, b)]
+        transformed_coords = []
+        for coord in coords:
+            coord = pygame.math.Vector2(coord)
+            coord = (coord[0] + p0[0] + offset, coord[1] + p0[1] + offset)
+            transformed_coords.append(coord)
+        gfxdraw.aapolygon(surf, transformed_coords, (204, 0, 0))
+        gfxdraw.filled_polygon(surf, transformed_coords, (0, 0, 0))
+
+        xys = np.array([p1, p2])
+        for (x, y) in xys:
+            x = x + offset
+            y = y + offset
+            gfxdraw.aacircle(surf, int(x), int(y), int(0.1 * scale), (204, 204, 0))
+            gfxdraw.filled_circle(surf, int(x), int(y), int(0.1 * scale), (204, 204, 0))
+
+        surf = pygame.transform.flip(surf, False, True)
+        self.screen.blit(surf, (0, 0))
 
         if self.render_mode == "human":
-            # The following line copies our drawings from `canvas` to the visible window
-            self.window.blit(canvas, canvas.get_rect())
             pygame.event.pump()
-            pygame.display.update()
-
-            # We need to ensure that human-rendering occurs at the predefined framerate.
-            # The following line will automatically add a delay to
-            # keep the framerate stable.
             self.clock.tick(self.metadata["render_fps"])
-        else:  # rgb_array
+            pygame.display.flip()
+
+        elif self.render_mode == "rgb_array":
             return np.transpose(
-                np.array(pygame.surfarray.pixels3d(canvas)), axes=(1, 0, 2)
+                np.array(pygame.surfarray.pixels3d(self.screen)), axes=(1, 0, 2)
             )
 
     def close(self):
-        if self.window is not None:
+        if self.screen is not None:
+            import pygame
+
             pygame.display.quit()
             pygame.quit()
+            self.isopen = False
