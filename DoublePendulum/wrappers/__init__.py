@@ -1,0 +1,4 @@
+from DoublePendulum.wrappers.clip_reward import ClipReward
+from DoublePendulum.wrappers.discrete_actions import DiscreteActions
+from DoublePendulum.wrappers.reacher_weighted_reward import ReacherRewardWrapper
+from DoublePendulum.wrappers.relative_position import RelativePosition
