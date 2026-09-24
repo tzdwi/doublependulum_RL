@@ -1,14 +1,11 @@
 """
-We're going to be training a Deep  to learn action policy
+We're going to be training a Deep Deterministic Policy Gradient to learn how to control the double pendulum
 """
-
-import gymnasium as gym
 import math
 import random
 import numpy as np
 import matplotlib
 import matplotlib.pyplot as plt
-from collections import namedtuple, deque
 from itertools import count
 
 import torch
@@ -16,25 +13,8 @@ import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
 
-from .. import max_seconds
-import DoublePendulum
+from .nn_common import this_dir, init_env, device, Transition, ReplayMemory
 
-def init_env(size=5, max_F=5, max_ang_vel=4*np.pi, mm=5.0, m1=1.0, l1=1.0, m2=1.0, l2=1.0, dt=0.03, theta_tol=np.pi/10):
-    max_episode_steps = int(max_seconds / dt)
-    env = gym.make("DoublePendulum/DoublePendulum-v0",
-                   max_episode_steps=max_episode_steps,
-                   size=size,
-                   max_F=max_F,
-                   max_ang_vel=max_ang_vel,
-                   mm=mm,
-                   m1=m1,
-                   l1=l1,
-                   m2=m2,
-                   l2=l2,
-                   dt=dt,
-                   theta_tol=theta_tol
-                  )
-    return env
 
 # set up matplotlib
 is_ipython = 'inline' in matplotlib.get_backend()
@@ -43,12 +23,7 @@ if is_ipython:
 
 plt.ion()
 
-# if GPU is to be used
-device = torch.device(
-    "cuda" if torch.cuda.is_available() else
-    "mps" if torch.backends.mps.is_available() else
-    "cpu"
-)
+
 
 # To ensure reproducibility during training, you can fix the random seeds
 # by uncommenting the lines below. This makes the results consistent across
@@ -67,30 +42,8 @@ device = torch.device(
 # if torch.cuda.is_available():
 #     torch.cuda.manual_seed(seed)
 
-# define transitions from state to state as a function of action
-Transition = namedtuple('Transition',
-                        ('state', 'action', 'next_state', 'reward'))
-
-import os
-this_dir = str(os.path.dirname(os.path.realpath(__file__)))
 DDPG_policy_pickle = this_dir+"/pickles/ddpg_policy_net.pt"
 DDPG_Q_pickle = this_dir+"/pickles/ddpg_q_net.pt"
-
-# hold transitions in memory
-class ReplayMemory(object):
-
-    def __init__(self, capacity):
-        self.memory = deque([], maxlen=capacity)
-
-    def push(self, *args):
-        """Save a transition"""
-        self.memory.append(Transition(*args))
-
-    def sample(self, batch_size):
-        return random.sample(self.memory, batch_size)
-
-    def __len__(self):
-        return len(self.memory)
 
 class DDPG_POLICY_DP(nn.Module):
     """
