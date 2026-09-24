@@ -1,5 +1,5 @@
 """
-We're going to be training a Deep Q-Network to learn action policy
+We're going to be training a Deep  to learn action policy
 """
 
 import gymnasium as gym
@@ -71,6 +71,11 @@ device = torch.device(
 Transition = namedtuple('Transition',
                         ('state', 'action', 'next_state', 'reward'))
 
+import os
+this_dir = str(os.path.dirname(os.path.realpath(__file__)))
+DDPG_policy_pickle = this_dir+"/pickles/ddpg_policy_net.pt"
+DDPG_Q_pickle = this_dir+"/pickles/ddpg_q_net.pt"
+
 # hold transitions in memory
 class ReplayMemory(object):
 
@@ -94,18 +99,20 @@ class DDPG_POLICY_DP(nn.Module):
     action from that distribution conditioned on s, in which case our outputs
     are a mean action, and a (log) standard deviation. WERE GOING TO PUT THE DISTRIBUTION VERSION IN A SEPARATE FILE
     """
-    def __init__(self, n_observations):
+    def __init__(self, n_observations, scale):
         super(DDPG_POLICY_DP, self).__init__()
         self.layer1 = nn.Linear(n_observations, 128)
         self.layer2 = nn.Linear(128, 128)
         self.layer3 = nn.Linear(128, 1)
+        self.activation = nn.SoftPlus()
+        self.scale = scale
 
     # Called with either one element to determine next action, or a batch
     # during optimization. Returns tensor([[dF]...]).
     def forward(self, x):
-        x = F.tanh(self.layer1(x))
-        x = F.tanh(self.layer2(x))
-        return self.layer3(x)
+        x = self.activation(self.layer1(x))
+        x = self.activation(self.layer2(x))
+        return self.scale*F.tanh(self.layer3(x))
 
 class DDPG_Q_DP(nn.Module):
     """
@@ -118,12 +125,13 @@ class DDPG_Q_DP(nn.Module):
         self.layer1 = nn.Linear(n_observations+1, 128)
         self.layer2 = nn.Linear(128, 128)
         self.layer3 = nn.Linear(128, 1)
+        self.activation = nn.SoftPlus()
 
     # Called with either one element to determine next action, or a batch
     # during optimization. Returns tensor([[dF]...]).
     def forward(self, x):
-        x = F.tanh(self.layer1(x))
-        x = F.tanh(self.layer2(x))
+        x = self.activation(self.layer1(x))
+        x = self.activation(self.layer2(x))
         return self.layer3(x)
 
 class DDPG_Learner:
@@ -145,6 +153,7 @@ class DDPG_Learner:
                  eps_decay=2500,
                  tau=0.995,
                  learning_rate=3e-4,
+                 start_steps=256,
                  buffer_length=10000):
 
         self.env = init_env(size=size,
@@ -176,19 +185,22 @@ class DDPG_Learner:
         self.TAU = tau
         self.LR = learning_rate
         
-        # Get number of actions from gym action space
-        self.n_actions = self.env.action_space.n
         # Get the number of state observations
         state, info = self.env.reset()
         self.state = state
         n_observations = len(state)
 
         # Net to predict the next action
-        self.policy_net = DDPG_POLICY_DP(n_observations).to(device)
-        self.policy_target = DDPG_POLICY_DP(n_observations).to(device)
+        self.policy_net = DDPG_POLICY_DP(n_observations, scale=self.env.action_space.high[0]).to(device)
+        # target net initialized with same weights
+        self.policy_target = DDPG_POLICY_DP(n_observations, scale=self.env.action_space.high[0]).to(device)
+        self.policy_target.load_state_dict(self.policy_net.state_dict())
+        
         # Net to predict the reward for the next action
-        self.Q_net = DDPG_Q_DP(n_observations, do_prob=do_prob).to(device)
-        self.Q_target = DDPG_POLICY_DP(n_observations, do_prob=do_prob).to(device)
+        self.Q_net = DDPG_Q_DP(n_observations).to(device)
+        # target net initialized with same weights
+        self.Q_target = DDPG_Q_DP(n_observations).to(device)
+        self.Q_target.load_state_dict(self.Q_net.state_dict())
         
         self.Q_optimizer = optim.AdamW(self.Q_net.parameters(),
                                        lr=self.LR, amsgrad=True)
@@ -199,38 +211,25 @@ class DDPG_Learner:
         self.memory = ReplayMemory(buffer_length)
     
         self.steps_done = 0
+        self.start_steps = max(start_steps, 2*self.BATCH_SIZE)
         
         self.episode_durations = []
 
-    def get_policy(self, obs):
-        if self.do_prob:
-            return torch.distributions.Normal(*self.policy_net(obs))
-        else:
-            return self.policy_net(obs)
-
-    def get_action(self, obs):
-        if self.do_prob:
-            return self.get_policy(obs).sample().item()
-        else:
-            return self.get_policy(obs).item()
-
     def select_action(self, state):
         """
-        We have an exponentially decaying probability of picking a
-        random action vs. and informed action from our policy network
-        """
-        sample = random.random()
-        eps_threshold = self.EPS_END + (self.EPS_START - self.EPS_END) * math.exp(-1. * self.steps_done / self.EPS_DECAY)
-        self.steps_done += 1
-        if sample > eps_threshold:
-            with torch.no_grad():
-                # the policy net directly predicts
-                # the next action given the state
-                action = self.policy_net(state)
-        else:
-            action = torch.tensor([[self.env.action_space.sample()]], device=device, dtype=torch.float32).view(1, 1)
+        We deterministically pick an action and add on decaying white noise.
 
-        return torch.clamp(action, -self.max_F, self.max_F)
+        We also want some exploration, so for the first `start_steps` steps, we uniformly sample
+        actions from the environment
+        """
+        if self.steps_done < self.start_steps:
+            action = torch.tensor([[self.env.action_space.sample()]], device=device, dtype=torch.float32).view(1, 1)
+        else:
+            steps_ellapsed = self.steps_done-self.start_steps
+            eps = self.EPS_END + (self.EPS_START - self.EPS_END) * math.exp(-1. * steps_ellapsed / self.EPS_DECAY)
+            action = self.policy_net(state) + torch.normal(0, eps)
+
+        return torch.clamp(action, self.env.action_space.low, self.env.action_space.high)
         
     def optimize_model(self):
         # if our memory is shorter than the batch size, then 
@@ -258,7 +257,7 @@ class DDPG_Learner:
         # state_batch is shape N_batch x n_observations
         # action_batch is shape N_batch x 1
         # concatenate along final axis
-        Q_in = torch.cat(state_batch, action_batch, dim=-1)
+        Q_in = torch.cat((state_batch, action_batch), dim=-1)
         state_action_values = self.Q_net(Q_in)
     
         # Compute targets y(r, s', d) = r + gamma*(1-d)Q_targ(s', pi(s'))
@@ -270,13 +269,13 @@ class DDPG_Learner:
             # non_final_next_states is shape N_batch_nonfinal x n_observations
             # next action values is shape N_batch_nonfinal x 1
             # concatenate along final axis
-            target_input = torch.cat(non_final_next_states, next_action_values, dim=-1)
+            target_input = torch.cat((non_final_next_states, next_action_values), dim=-1)
             next_state_values[non_final_mask] = self.GAMMA*self.Q_target(target_input)
 
         targets = reward_batch+next_state_values
     
         # Compute Huber loss
-        loss = self.criterion(state_action_values, expected_state_action_values.unsqueeze(1))
+        loss = self.criterion(state_action_values, targets.unsqueeze(1))
     
         # Gradient descend the Q_net parameters
         self.Q_optimizer.zero_grad()
@@ -287,7 +286,7 @@ class DDPG_Learner:
 
         # Now gradient ascend the policy_net parameters
         next_actions = self.policy_net(state_batch)
-        Q_in = torch.cat(state_batch, next_actions, dim=-1)
+        Q_in = torch.cat((state_batch, next_actions), dim=-1)
         # we want gradient _ascent_ so we use the negative of the sum of action values
         loss = -self.Q_net(Q_in).sum()/self.BATCH_SIZE
         self.policy_optimizer.zero_grad()
@@ -327,27 +326,40 @@ class DDPG_Learner:
         
                 # Move to the next state
                 state = next_state
-        
-                # Optimization step
-                self.optimize_model()
-        
-                # Polyak averaging to update target nets
-                Q_net_state_dict = self.Q_net.state_dict()
-                policy_net_state_dict = self.policy_net.state_dict()
 
-                Q_target_state_dict = self.Q_target.state_dict()
-                policy_target_state_dict = self.policy_target.state_dict()
-
-                for key in Q_net_state_dict:
-                    Q_state_dict[key] = Q_target_state_dict[key]*self.TAU + Q_net_state_dict[key]*(1-self.TAU)
-                for key in policy_net_state_dict:
-                    policy_target_state_dict[key] = policy_target_state_dict[key]*self.TAU + policy_net_state_dict[key]*(1-self.TAU)
-                
-                self.Q_target.load_state_dict(Q_target_state_dict)
-                self.policy_target.load_state_dict(policy_target_state_dict)
+                if len(self.memory) > self.start_steps:
+        
+                    # Optimization step
+                    self.optimize_model()
+            
+                    # Polyak averaging to update target nets
+                    Q_net_state_dict = self.Q_net.state_dict()
+                    policy_net_state_dict = self.policy_net.state_dict()
+    
+                    Q_target_state_dict = self.Q_target.state_dict()
+                    policy_target_state_dict = self.policy_target.state_dict()
+    
+                    for key in Q_net_state_dict:
+                        Q_target_state_dict[key] = Q_target_state_dict[key]*self.TAU + Q_net_state_dict[key]*(1-self.TAU)
+                    for key in policy_net_state_dict:
+                        policy_target_state_dict[key] = policy_target_state_dict[key]*self.TAU + policy_net_state_dict[key]*(1-self.TAU)
+                    
+                    self.Q_target.load_state_dict(Q_target_state_dict)
+                    self.policy_target.load_state_dict(policy_target_state_dict)
         
                 if done:
                     self.episode_durations.append(t + 1)
                     break
+
+    def dump(self):
+        torch.save(self.policy_target, DDPG_policy_pickle)
+        torch.save(self.Q_target, DDPG_Q_pickle)
+
+    def load(self):
+        self.policy_target.load_state_dict(torch.load(DDPG_policy_pickle, weights_only=True, map_location=device))
+        self.Q_target.load_state_dict(torch.load(DDPG_Q_pickle, weights_only=True, map_location=device))
+
+        self.policy_net.load_state_dict(self.policy_target.state_dict())
+        self.Q_net.load_state_dict(self.Q_target.state_dict())
 
 
