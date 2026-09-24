@@ -4,7 +4,7 @@ from gymnasium.error import DependencyNotInstalled
 import pygame
 import numpy as np
 
-from ..doublependulum.doublependulum import DoublePendulum
+from ..doublependulum.physics.doublependulum import DoublePendulum
 
 
 class DoublePendulumEnv(gym.Env):
