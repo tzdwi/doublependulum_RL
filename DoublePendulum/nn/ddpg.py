@@ -104,7 +104,7 @@ class DDPG_POLICY_DP(nn.Module):
         self.layer1 = nn.Linear(n_observations, 128)
         self.layer2 = nn.Linear(128, 128)
         self.layer3 = nn.Linear(128, 1)
-        self.activation = nn.SoftPlus()
+        self.activation = nn.Softplus()
         self.scale = scale
 
     # Called with either one element to determine next action, or a batch
@@ -125,7 +125,7 @@ class DDPG_Q_DP(nn.Module):
         self.layer1 = nn.Linear(n_observations+1, 128)
         self.layer2 = nn.Linear(128, 128)
         self.layer3 = nn.Linear(128, 1)
-        self.activation = nn.SoftPlus()
+        self.activation = nn.Softplus()
 
     # Called with either one element to determine next action, or a batch
     # during optimization. Returns tensor([[dF]...]).
@@ -225,9 +225,10 @@ class DDPG_Learner:
         if self.steps_done < self.start_steps:
             action = torch.tensor([[self.env.action_space.sample()]], device=device, dtype=torch.float32).view(1, 1)
         else:
+            action = self.policy_net(state) 
             steps_ellapsed = self.steps_done-self.start_steps
             eps = self.EPS_END + (self.EPS_START - self.EPS_END) * math.exp(-1. * steps_ellapsed / self.EPS_DECAY)
-            action = self.policy_net(state) + torch.normal(0, eps)
+            action += eps*torch.randn_like(action)
 
         return torch.clamp(action, self.env.action_space.low, self.env.action_space.high)
         
@@ -270,7 +271,7 @@ class DDPG_Learner:
             # next action values is shape N_batch_nonfinal x 1
             # concatenate along final axis
             target_input = torch.cat((non_final_next_states, next_action_values), dim=-1)
-            next_state_values[non_final_mask] = self.GAMMA*self.Q_target(target_input)
+            next_state_values[non_final_mask] = self.GAMMA*self.Q_target(target_input).squeeze(-1)
 
         targets = reward_batch+next_state_values
     
@@ -290,7 +291,7 @@ class DDPG_Learner:
         # we want gradient _ascent_ so we use the negative of the sum of action values
         loss = -self.Q_net(Q_in).sum()/self.BATCH_SIZE
         self.policy_optimizer.zero_grad()
-        Q_out.backward()
+        loss.backward()
         # In-place gradient clipping
         torch.nn.utils.clip_grad_value_(self.policy_net.parameters(), 100)
         self.policy_optimizer.step()
@@ -306,12 +307,14 @@ class DDPG_Learner:
         for i_episode in range(num_episodes):
             # Initialize the environment and get its state
             state, info = self.env.reset()
+            self.steps_done = 0
             state = torch.tensor(state, dtype=torch.float32, device=device).unsqueeze(0)
             for t in count():
                 # select action based on observed state
                 action = self.select_action(state)
                 # take step in environment to get next state, reward, and termination/truncation signals
                 observation, reward, terminated, truncated, _ = self.env.step(action.item())
+                self.steps_done += 1
                 reward = torch.tensor([reward], device=device)
                 # done signal is either terminated or truncated
                 done = terminated or truncated
@@ -352,8 +355,8 @@ class DDPG_Learner:
                     break
 
     def dump(self):
-        torch.save(self.policy_target, DDPG_policy_pickle)
-        torch.save(self.Q_target, DDPG_Q_pickle)
+        torch.save(self.policy_target.state_dict(), DDPG_policy_pickle)
+        torch.save(self.Q_target.state_dict(), DDPG_Q_pickle)
 
     def load(self):
         self.policy_target.load_state_dict(torch.load(DDPG_policy_pickle, weights_only=True, map_location=device))
