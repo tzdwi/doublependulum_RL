@@ -105,7 +105,7 @@ class DoublePendulumEnv(gym.Env):
         # Action will be selected from +/- 0.5
         # Update current force, clipped to current boundaries
         self._agent_location = np.clip(
-            self._agent_location + action.squeeze(), -self.max_F, self.max_F
+            self._agent_location + action, -self.max_F, self.max_F
         )
         # Now apply the current force to the pendulum
         self.pendulum.step(F=self._agent_location)

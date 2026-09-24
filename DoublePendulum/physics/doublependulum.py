@@ -72,7 +72,7 @@ class DoublePendulum:
         self._make_system()
 
     def _initialize(self, seed):
-        rng = np.default_rng(seed)
+        rng = np.random.default_rng(seed)
         self.t = 0
         init_arr = np.zeros(6) # x_m, theta_1, theta_2, then time derivatives
         init_arr[1] = rng.normal() #random
