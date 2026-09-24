@@ -223,14 +223,15 @@ class DDPG_Learner:
         actions from the environment
         """
         if self.steps_done < self.start_steps:
-            action = torch.tensor([[self.env.action_space.sample()]], device=device, dtype=torch.float32).view(1, 1)
+            action = torch.as_tensor(self.env.action_space.sample(), device=device, dtype=torch.float32).view(1, 1)
         else:
-            action = self.policy_net(state) 
-            steps_ellapsed = self.steps_done-self.start_steps
-            eps = self.EPS_END + (self.EPS_START - self.EPS_END) * math.exp(-1. * steps_ellapsed / self.EPS_DECAY)
-            action += eps*torch.randn_like(action)
+            with torch.no_grad():
+                action = self.policy_net(state) 
+                steps_ellapsed = self.steps_done-self.start_steps
+                eps = self.EPS_END + (self.EPS_START - self.EPS_END) * math.exp(-1. * steps_ellapsed / self.EPS_DECAY)
+                action += eps*torch.randn_like(action)
 
-        return torch.clamp(action, self.env.action_space.low, self.env.action_space.high)
+        return torch.clamp(action, float(self.env.action_space.low[0]), float(self.env.action_space.high[0]))
         
     def optimize_model(self):
         # if our memory is shorter than the batch size, then 
@@ -248,7 +249,10 @@ class DDPG_Learner:
         # (a final state would've been the one after which simulation ended)
         non_final_mask = torch.tensor(tuple(map(lambda s: s is not None,
                                               batch.next_state)), device=device, dtype=torch.bool)
-        non_final_next_states = torch.cat([s for s in batch.next_state
+        if not non_final_mask.any():
+            non_final_next_states = torch.tensor([])
+        else:
+            non_final_next_states = torch.cat([s for s in batch.next_state
                                                     if s is not None])
         state_batch = torch.cat(batch.state)
         action_batch = torch.cat(batch.action)
@@ -307,7 +311,6 @@ class DDPG_Learner:
         for i_episode in range(num_episodes):
             # Initialize the environment and get its state
             state, info = self.env.reset()
-            self.steps_done = 0
             state = torch.tensor(state, dtype=torch.float32, device=device).unsqueeze(0)
             for t in count():
                 # select action based on observed state
