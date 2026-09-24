@@ -12,7 +12,7 @@ class DoublePendulumEnv(gym.Env):
     SCREEN_DIM = 512
     SUCCESS_TIME = 5 # We'll have won if we get the thing to stand up for 5 seconds
 
-    def __init__(self, render_mode=None, size=5, max_F=5, max_ang_vel=4*np.pi, mm=5.0, m1=1.0, l1=1.0, m2=1.0, l2=1.0, dt=0.03, atol=1e-4):
+    def __init__(self, render_mode=None, size=5, max_F=5, max_ang_vel=4*np.pi, mm=5.0, m1=1.0, l1=1.0, m2=1.0, l2=1.0, dt=0.03, theta_tol=np.pi/10):
         self.size = size  # The size of the track
         self.max_F = max_F # maximum applied F in Neutons
         self.max_ang_vel = max_ang_vel # we'll allow the second pendulum to go faster though 
@@ -20,7 +20,7 @@ class DoublePendulumEnv(gym.Env):
         if self.dt != 0.03:
             self.metadata = {**self.metadata, "render_fps": int(1 / self.dt)}
         self.max_cart_vel = self.size/self.dt/2 # can we resolve the cart's motion?
-        self.atol = atol #absolute tolerance in variance between state and target
+        self.theta_tol = theta_tol #absolute tolerance in variance between state and "standing"
 
         # We don't care about the position of the cart, but we do care about its velocity
         self._target_loc = np.zeros(5) # we don't care about the location of the box
@@ -74,6 +74,9 @@ class DoublePendulumEnv(gym.Env):
     def _get_obs(self):
         return np.append(self.pendulum.x, self._agent_location)
 
+    def _clip_obs(self, observation):
+        return np.clip(observation, self.observation_space.low, self.observation_space.high)
+
     def reset(self, seed=None, options=None):
         # We need the following line to seed self.np_random
         super().reset(seed=seed)
@@ -88,12 +91,15 @@ class DoublePendulumEnv(gym.Env):
         observation = self._get_obs()
         self.state = observation
 
+        # Reset success frames
+        self.success_frames = 0
+
         info = {}
 
         if self.render_mode == "human":
             self.render()
 
-        return observation, info
+        return self._clip_obs(observation), info
 
     def step(self, action):
         # Action will be selected from +/- 0.5
@@ -107,14 +113,15 @@ class DoublePendulumEnv(gym.Env):
         observation = self._get_obs()
         self.state = observation
         
-        # An episode is done iff the agent has reached the target
-        # TO DO:
-        # COUNT SUCCESSFRAMES, TERMINATE WHEN WE'VE GOTTEN
-        # TO THE MAX OR IF WE'VE FALLEN OFF THE TRACK
-        # ALSO GIVE A BAD REWARD IF WE'RE SPINNING TOO FAST
-        """terminated, oob = self._terminate_oob()
-        if terminated and not oob:
+        # An episode is done iff the pendulum is vertical,
+        # and all velocities are < 0.1% of the relevant velocity
+        # scale (average pendulum length / dt)
+        terminated, offtrack, oob = self._terminate_offtrack_or_oob()
+        if terminated:
             reward = 1000
+        elif offtrack:
+            reward = -100
+            terminated = True
         elif oob:
             reward = -10
         else:
@@ -124,13 +131,14 @@ class DoublePendulumEnv(gym.Env):
                 power = 2.0
             else:
                 power = 1.0
-            reward = -0.1*np.linalg.norm(dist)**power"""
+            reward = -0.1*np.linalg.norm(dist)**power
+        
         info = {}
 
         if self.render_mode == "human":
             self.render()
 
-        return observation, reward, terminated, tuncated, info
+        return self._clip_obs(observation), reward, terminated, False, info
     
     def _distance(self):
         raw_dist = self.state[1:6] - self._target_loc
@@ -138,14 +146,34 @@ class DoublePendulumEnv(gym.Env):
         raw_dist[1] = np.atan2(np.sin(raw_dist[1]), np.cos(raw_dist[1]))
         return raw_dist
 
-    def _terminate_oob(self):
+    def _increment_success_frames_or_reset(self):
         s = self.state
         assert s is not None, "Call reset before using DoublePendulumEnv object."
-        terminate = np.allclose(s[1:6], self._target_loc, atol=self.atol)
+        thetas = s[1:3]
+        cart_coord = self.pendulum.transform_cartesian(do_vels=True)
+        vm = cart_coord[3]
+        v1 = np.linalg.norm(cart_coord[4])
+        v2 = np.linalg.norm(cart_coord[5])
+        # we're up if all thetas are pi
+        up = np.all([np.abs(np.atan2(np.sin(thet - np.pi), np.cos(thet - np.pi))) < self.theta_tol for thet in thetas])
+        # we're "still" if all velocities are less than a tenth%
+        # of the relevant length and time scales
+        still = np.allclose([vm, v1, v2], 0.0, atol=0.001*np.mean([self.l1, self.l2])/self.dt)
+        if up & still:
+            self.success_frames += 1
+        else:
+            self.success_frames = 0
+        return s
+
+    def _terminate_offtrack_or_oob(self):
+        s = self._increment_success_frames_or_reset()
+        terminate = self.success_frames * self.dt >= self.SUCCESS_TIME
+        pos = s[0]
+        offtrack = np.abs(pos) > self.size
         low = self.observation_space.low
         high = self.observation_space.high
         oob = not (np.all(s >= low) & np.all(s <= high))
-        return terminate or oob, oob
+        return terminate, offtrack, oob
 
     def render(self):
         if self.render_mode is None:
