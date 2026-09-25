@@ -203,33 +203,30 @@ class SAC_Learner:
         # Compute targets y(r, s', d) = r + gamma*(1-d)*min(Q_targ(s', a')) - alpha log pi(a', s')), a' ~ pi( s')
         # for each batch state according to target policy_net and Q_net
         next_state_values = torch.zeros(self.BATCH_SIZE, device=device)
-        with torch.no_grad():
-            # we're not updating the targets yet, so don't accumulate grads
-            next_action_mus, next_action_logsigmas = self.policy_net(non_final_next_states).chunk(2, dim=-1)
-            next_action_logsigmas = next_action_logsigmas.clamp(-20, 2)
-            dists = [torch.distributions.Normal(mus, torch.exp(logsigma)) for mu, logsigma in zip(
-                next_action_mus, next_action_logsigmas)
-                    ]
-            u = torch.cat([d.sample() for d in dists])
-            next_action_values = self.scale*F.tanh(u)
-            # see log prob def in appendix C here: https://arxiv.org/pdf/1801.01290
-            logprobs = torch.cat([d.log_prob(n) for d,n in zip(dists,u)]) - torch.log(
-                (1.0-torch.power(F.tanh(u),2.0)+1e-12)
-                )-torch.log(self.scale)
-            # non_final_next_states is shape N_batch_nonfinal x n_observations
-            # next action values is shape N_batch_nonfinal x 1
-            # concatenate along final axis
-            target_input = torch.cat((non_final_next_states, next_action_values), dim=-1)
-            # each Q net returns Bx1, so we want to stack along the last dim
-            Qs = torch.cat([Q_target(target_input) for Q_target in [self.Q_target_1, self.Q_target_2]], dim=-1)
-            selected = torch.min(Qs, dim=-1).values
-            
-            next_state_values[non_final_mask] = self.GAMMA*(selected.squeeze(-1)-self.ALPHA*logprobs)
+        if non_final_mask.any()
+            with torch.no_grad():
+                # we're not updating the targets yet, so don't accumulate grads
+                next_action_mus, next_action_logsigmas = self.policy_net(non_final_next_states).chunk(2, dim=-1)
+                next_action_logsigmas = next_action_logsigmas.clamp(-20, 2)
+                dists = torch.distributions.Normal(next_action_mus, torch.exp(next_action_logsigmas))
+                u = dists.sample()
+                next_action_values = self.scale*F.tanh(u)
+                # see log prob def in appendix C here: https://arxiv.org/pdf/1801.01290
+                logprobs = dists.log_prob(u) - torch.log(1.0-torch.pow(F.tanh(u),2.0)+1e-12)-torch.log(self.scale)
+                # non_final_next_states is shape N_batch_nonfinal x n_observations
+                # next action values is shape N_batch_nonfinal x 1
+                # concatenate along final axis
+                target_input = torch.cat((non_final_next_states, next_action_values), dim=-1)
+                # each Q net returns Bx1, so we want to stack along the last dim
+                Qs = torch.cat([Q_target(target_input) for Q_target in [self.Q_target_1, self.Q_target_2]], dim=-1)
+                selected = torch.min(Qs, dim=-1).values
+                
+                next_state_values[non_final_mask] = self.GAMMA*(selected.squeeze(-1)-self.ALPHA*logprobs)
 
         targets = reward_batch+next_state_values
     
         # Compute Huber loss
-        loss = self.criterion(state_action_values_1, targets) + self.criterion(state_action_values_2, targets)
+        loss = self.criterion(state_action_values_1.squeeze(-1), targets) + self.criterion(state_action_values_2.squeeze(-1), targets)
     
         # Gradient descend the Q_net parameters
         self.Q_optimizer.zero_grad()
@@ -242,15 +239,11 @@ class SAC_Learner:
         # Now gradient ascend the policy_net parameters
         next_action_mus, next_action_logsigmas = self.policy_net(state_batch).chunk(2, dim=-1)
         next_action_logsigmas = next_action_logsigmas.clamp(-20, 2)
-        dists = [torch.distributions.Normal(mus, torch.exp(logsigma)) for mu, logsigma in zip(
-                next_action_mus, next_action_logsigmas)
-                    ]
-        u = torch.cat([d.rsample() for d in dists])
+        dists = torch.distributions.Normal(next_action_mus, torch.exp(next_action_logsigmas))
+        u = dists.rsample()
         next_action_values = self.scale*F.tanh(u)
         # again, logprob defined in appC here: https://arxiv.org/pdf/1801.01290
-        logprobs = torch.cat([d.log_prob(n) for d,n in zip(dists,u)]) - torch.log(
-                (1.0-torch.power(F.tanh(u),2.0)+1e-12)
-                )-torch.log(self.scale)
+        logprobs = dists.log_prob(u) - torch.log(1.0-torch.pow(F.tanh(u),2.0)+1e-12)-torch.log(self.scale)
         Q_in = torch.cat((state_batch, next_action_values), dim=-1)
         # each Q net returns Bx1, so we want to stack along the last dim
         Qs = torch.cat([Q_net(Q_in) for Q_net in [self.Q_net_1, self.Q_net_2]], dim=-1)

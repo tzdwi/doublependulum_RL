@@ -222,14 +222,15 @@ class DDPG_Learner:
         # Compute targets y(r, s', d) = r + gamma*(1-d)Q_targ(s', pi(s'))
         # for each batch state according to target policy_net and Q_net
         next_state_values = torch.zeros(self.BATCH_SIZE, device=device)
-        with torch.no_grad():
-            # we're not updating the targets yet, so don't accumulate grads
-            next_action_values = self.policy_target(non_final_next_states)
-            # non_final_next_states is shape N_batch_nonfinal x n_observations
-            # next action values is shape N_batch_nonfinal x 1
-            # concatenate along final axis
-            target_input = torch.cat((non_final_next_states, next_action_values), dim=-1)
-            next_state_values[non_final_mask] = self.GAMMA*self.Q_target(target_input).squeeze(-1)
+        if non_final_mask.any():
+            with torch.no_grad():
+                # we're not updating the targets yet, so don't accumulate grads
+                next_action_values = self.policy_target(non_final_next_states)
+                # non_final_next_states is shape N_batch_nonfinal x n_observations
+                # next action values is shape N_batch_nonfinal x 1
+                # concatenate along final axis
+                target_input = torch.cat((non_final_next_states, next_action_values), dim=-1)
+                next_state_values[non_final_mask] = self.GAMMA*self.Q_target(target_input).squeeze(-1)
 
         targets = reward_batch+next_state_values
     
