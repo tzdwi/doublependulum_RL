@@ -13,7 +13,7 @@ from pathlib import Path
 from .. import max_seconds
 
 this_dir = str(os.path.dirname(os.path.realpath(__file__)))
-plot_dir = str(Path(__file__).parent.parent.parent))+"/scripts/figures"
+plot_dir = str(Path(__file__).parent.parent.parent)+"/scripts/figures"
 
 def init_env(size=5, max_F=5, max_ang_vel=4*np.pi, mm=5.0, m1=1.0, l1=1.0, m2=1.0, l2=1.0, dt=0.03, theta_tol=np.pi/10):
     max_episode_steps = int(max_seconds / dt)
