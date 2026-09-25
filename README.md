@@ -68,4 +68,12 @@ $$\dot{\mathbf{x}}=\begin{pmatrix}
 -\mathbf{D}^{-1}\mathbf{H}
 \end{pmatrix}F_m$$
 
-Now we have something we can work with! But let's give thanks where thanks are due, to A. Bogdanov (2004) https://www.researchgate.net/publication/250107215_Optimal_Control_of_a_Double_Inverted_Pendulum_on_a_Cart
+Now we have something we can work with! But let's give thanks where thanks are due, to [A. Bogdanov (2004)][https://www.researchgate.net/publication/250107215_Optimal_Control_of_a_Double_Inverted_Pendulum_on_a_Cart].
+
+All of the physics implementation (with 4th order Runge-Kutta solver) is in `DoublePendulum/physics`. Next, we need to place this whole system into a reinforcement learning context, where we have the system in a state $s$, and an agent that acts on that state via actions $a$. In this case, our state is easy:
+
+$$\mathbf{s}=(\mathbf{x}^T, F_m)$$
+
+and our actions will be a differential force to apply over the next iteration timestep, $F_{t+1}=F_t + dF$. Using the `gymnasium` package, we can create a custom environment that can hold the state, apply actions, and, critically, define the reward for that action. The details of this implementation are in `DoubplePendulum/envs`. Finally, we can start with some machine learning!
+
+The goal is going to be to learn a "policy" function $\pi$ that maps us from a state to an action. That function can be deterministic or stochastic. We've implemented both in `DoubplePendulum/nn`, using techniques that fall under the broad umbrella called "Q-learning", where we also try to learn a function $Q$ that estimates the reward of applying an action from $pi$ to a state; the deterministic implementation is a Deep Deterministic Policy Gradient model, and the stochastic implementation is a Soft Actor-Critic model. If you want to experiment with using these models, you can find example scripts in `scripts`. Coming soon: a widget to play with these models on my website!
