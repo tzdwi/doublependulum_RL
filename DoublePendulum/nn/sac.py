@@ -16,16 +16,14 @@ import torch.nn.functional as F
 
 from .nn_common import this_dir, init_env, device, Transition, ReplayMemory
 
-# set up matplotlib
-is_ipython = 'inline' in matplotlib.get_backend()
-if is_ipython:
-    from IPython import display
-
-plt.ion()
-
 SAC_policy_pickle = this_dir+"/pickles/sac_policy_net.pt"
 SAC_Q1_pickle = this_dir+"/pickles/sac_q1_net.pt"
 SAC_Q2_pickle = this_dir+"/pickles/sac_q2_net.pt"
+
+SAC_EPISODE_DURATION_FIG = this_dir+"../../scripts/figures/sac_episode_duration.png"
+SAC_CUM_REWARDS_FIG = this_dir+"../../scripts/figures/sac_cum_rewards.png"
+SAC_BALANCED_FIG = this_dir+"../../scripts/figures/sac_balanced.png"
+SAC_TRUNCATED_FIG = this_dir+"../../scripts/figures/sac_truncated.png"
 
 class SAC_POLICY_DP(nn.Module):
     """
@@ -89,7 +87,7 @@ class SAC_Learner:
                  alpha=0.2,
                  learning_rate=3e-4,
                  start_steps=256,
-                 buffer_length=10000):
+                 buffer_length=1e6):
 
         self.env = init_env(size=size,
                             max_F=max_F,
@@ -142,12 +140,15 @@ class SAC_Learner:
                                             lr=self.LR, amsgrad=True)
         # Huber loss
         self.criterion = nn.SmoothL1Loss()
-        self.memory = ReplayMemory(buffer_length)
+        self.memory = ReplayMemory(int(buffer_length))
     
         self.steps_done = 0
         self.start_steps = max(start_steps, 2*self.BATCH_SIZE)
         
         self.episode_durations = []
+        self.cumulative_rewards = []
+        self.final_state_balanced = []
+        self.final_state_truncated = []
 
     def select_action(self, state):
         """
@@ -257,7 +258,7 @@ class SAC_Learner:
         self.policy_optimizer.step()
         
     
-    def train(self, progress=False):
+    def train(self, progress=False, make_plots=False):
 
         if torch.cuda.is_available() or torch.backends.mps.is_available():
             num_episodes = 600
@@ -269,6 +270,7 @@ class SAC_Learner:
             iterator = tqdm(iterator)
         
         for i_episode in iterator:
+            cumulative_reward = 0
             # Initialize the environment and get its state
             state, info = self.env.reset()
             state = torch.tensor(state, dtype=torch.float32, device=device).unsqueeze(0)
@@ -278,6 +280,7 @@ class SAC_Learner:
                 # take step in environment to get next state, reward, and termination/truncation signals
                 observation, reward, terminated, truncated, _ = self.env.step(action.item())
                 self.steps_done += 1
+                cumulative_reward += reward
                 reward = torch.tensor([reward], device=device)
                 # done signal is either terminated or truncated
                 done = terminated or truncated
@@ -310,7 +313,37 @@ class SAC_Learner:
         
                 if done:
                     self.episode_durations.append(t + 1)
+                    self.cumulative_rewards.append(cumulative_reward)
+                    if reward == 1000:
+                        self.final_state_balanced.append(1)
+                    else:
+                        self.final_state_balanced.append(0)
+                    if truncated:
+                        self.final_state_truncated.append(1)
+                    else:
+                        self.final_state_truncated.append(0)
                     break
+        if make_plots:
+            fig = plt.figure(dpi=300)
+            plt.plot(np.arange(num_episodes), self.episode_durations)
+            plt.xlabel('Episode')
+            plt.ylabel('Episode Duration')
+            plt.savefig(SAC_EPISODE_DURATION_FIG, bbox_inches='tight')
+            plt.clf()
+            plt.plot(np.arange(num_episodes), self.cumulative_rewards)
+            plt.xlabel('Episode')
+            plt.ylabel('Cumulative Rewards')
+            plt.savefig(SAC_CUM_REWARDS_FIG, bbox_inches='tight')
+            plt.clf()
+            plt.plot(np.arange(num_episodes), self.final_state_truncated)
+            plt.xlabel('Episode')
+            plt.ylabel('Episode Truncated')
+            plt.savefig(SAC_TRUNCATED_FIG, bbox_inches='tight')
+            plt.clf()
+            plt.plot(np.arange(num_episodes), self.final_state_balanced)
+            plt.xlabel('Episode')
+            plt.ylabel('Episode Success')
+            plt.savefig(SAC_BALANCED_FIG, bbox_inches='tight')
 
     def dump(self):
         torch.save(self.policy_net.state_dict(), SAC_policy_pickle)
