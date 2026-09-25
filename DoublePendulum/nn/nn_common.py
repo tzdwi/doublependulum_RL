@@ -7,6 +7,9 @@ import torch
 import random
 from collections import namedtuple, deque
 import os
+import numpy as np
+
+from .. import max_seconds
 
 this_dir = str(os.path.dirname(os.path.realpath(__file__)))
 

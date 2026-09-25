@@ -7,6 +7,7 @@ import numpy as np
 import matplotlib
 import matplotlib.pyplot as plt
 from itertools import count
+from tqdm import tqdm
 
 import torch
 import torch.nn as nn
@@ -254,14 +255,18 @@ class DDPG_Learner:
         self.policy_optimizer.step()
         
     
-    def train(self):
+    def train(self, progress=False):
 
         if torch.cuda.is_available() or torch.backends.mps.is_available():
             num_episodes = 600
         else:
             num_episodes = 50
+
+        iterator = range(num_episodes)
+        if progress:
+            iterator = tqdm(iterator)
         
-        for i_episode in range(num_episodes):
+        for i_episode in iterator:
             # Initialize the environment and get its state
             state, info = self.env.reset()
             state = torch.tensor(state, dtype=torch.float32, device=device).unsqueeze(0)
