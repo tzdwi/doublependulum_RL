@@ -14,16 +14,16 @@ import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
 
-from .nn_common import this_dir, init_env, device, Transition, ReplayMemory
+from .nn_common import this_dir, plot_dir, init_env, device, Transition, ReplayMemory
 
 SAC_policy_pickle = this_dir+"/pickles/sac_policy_net.pt"
 SAC_Q1_pickle = this_dir+"/pickles/sac_q1_net.pt"
 SAC_Q2_pickle = this_dir+"/pickles/sac_q2_net.pt"
 
-SAC_EPISODE_DURATION_FIG = this_dir+"../../scripts/figures/sac_episode_duration.png"
-SAC_CUM_REWARDS_FIG = this_dir+"../../scripts/figures/sac_cum_rewards.png"
-SAC_BALANCED_FIG = this_dir+"../../scripts/figures/sac_balanced.png"
-SAC_TRUNCATED_FIG = this_dir+"../../scripts/figures/sac_truncated.png"
+SAC_EPISODE_DURATION_FIG = plot_dir+"/sac_episode_duration.png"
+SAC_CUM_REWARDS_FIG = plot_dir+"/sac_cum_rewards.png"
+SAC_BALANCED_FIG = plot_dir+"/sac_balanced.png"
+SAC_TRUNCATED_FIG = plot_dir+"/sac_truncated.png"
 
 class SAC_POLICY_DP(nn.Module):
     """

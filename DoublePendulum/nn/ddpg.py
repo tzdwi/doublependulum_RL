@@ -14,42 +14,16 @@ import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
 
-from .nn_common import this_dir, init_env, device, Transition, ReplayMemory
+from .nn_common import this_dir, plot_dir, init_env, device, Transition, ReplayMemory
 
-
-# set up matplotlib
-is_ipython = 'inline' in matplotlib.get_backend()
-if is_ipython:
-    from IPython import display
-
-plt.ion()
-
-
-
-# To ensure reproducibility during training, you can fix the random seeds
-# by uncommenting the lines below. This makes the results consistent across
-# runs, which is helpful for debugging or comparing different approaches.
-#
-# That said, allowing randomness can be beneficial in practice, as it lets
-# the model explore different training trajectories.
-
-
-# seed = 42
-# random.seed(seed)
-# torch.manual_seed(seed)
-# env.reset(seed=seed)
-# env.action_space.seed(seed)
-# env.observation_space.seed(seed)
-# if torch.cuda.is_available():
-#     torch.cuda.manual_seed(seed)
 
 DDPG_policy_pickle = this_dir+"/pickles/ddpg_policy_net.pt"
 DDPG_Q_pickle = this_dir+"/pickles/ddpg_q_net.pt"
 
-DDPG_EPISODE_DURATION_FIG = this_dir+"../../scripts/figures/ddpg_episode_duration.png"
-DDPG_CUM_REWARDS_FIG = this_dir+"../../scripts/figures/ddpg_cum_rewards.png"
-DDPG_BALANCED_FIG = this_dir+"../../scripts/figures/ddpg_balanced.png"
-DDPG_TRUNCATED_FIG = this_dir+"../../scripts/figures/ddpg_truncated.png"
+DDPG_EPISODE_DURATION_FIG = plot_dir+"/ddpg_episode_duration.png"
+DDPG_CUM_REWARDS_FIG = plot_dir+"/ddpg_cum_rewards.png"
+DDPG_BALANCED_FIG = plot_dir+"/ddpg_balanced.png"
+DDPG_TRUNCATED_FIG = plot_dir+"/ddpg_truncated.png"
 
 class DDPG_POLICY_DP(nn.Module):
     """
