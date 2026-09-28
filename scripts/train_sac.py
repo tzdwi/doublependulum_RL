@@ -9,6 +9,6 @@ print('Imported!')
 learner = sac.SAC_Learner()
 print('Initialized!')
 
-learner.train(progress=True, make_plots=True)
+learner.train(progress=True, make_plots=True, num_episodes=10000)
 
 learner.dump()

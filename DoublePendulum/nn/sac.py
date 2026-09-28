@@ -87,7 +87,8 @@ class SAC_Learner:
                  alpha=0.2,
                  learning_rate=3e-4,
                  start_steps=256,
-                 buffer_length=1e6):
+                 buffer_length=1e6,
+                 log_progress=False):
 
         self.env = init_env(size=size,
                             max_F=max_F,
@@ -100,7 +101,23 @@ class SAC_Learner:
                             dt=dt,
                             theta_tol=theta_tol)
     
+        self.log_progress=log_progress
+        self.log_env=None
+        if self.log_progress:
+            self.log_env = init_env(size=size,
+                            max_F=max_F,
+                            max_ang_vel=max_ang_vel,
+                            mm=mm,
+                            m1=m1,
+                            l1=l1,
+                            m2=m2,
+                            l2=l2,
+                            dt=dt,
+                            theta_tol=theta_tol,
+                            render_mode="rbg_array")
+    
         
+    
     
         # BATCH_SIZE is the number of transitions sampled from the replay buffer
         # GAMMA is the discount factor 
@@ -256,20 +273,42 @@ class SAC_Learner:
         # In-place gradient clipping
         torch.nn.utils.clip_grad_value_(self.policy_net.parameters(), 100)
         self.policy_optimizer.step()
-        
-    
-    def train(self, progress=False, make_plots=False):
 
-        if torch.cuda.is_available() or torch.backends.mps.is_available():
-            num_episodes = 600
-        else:
-            num_episodes = 50
+    def run_sim(self, episode_number):
+        state, info = self.env.reset()
+        state = torch.tensor(state, dtype=torch.float32, device=device).unsqueeze(0)
+        done = False
+        while not done:
+                # select action based on observed state
+            action = self.select_action(state)
+            # take step in environment to get next state, reward, and termination/truncation signals
+            observation, reward, terminated, truncated, _ = self.env.step(action.item())
+            """
+            DO THE MAGIC WHERE WE MAKE THE MOVIE AND PLOT THE REWARD FROM THE LAST STEP
+            """
+            reward = torch.tensor([reward], device=device)
+            # done signal is either terminated or truncated
+            done = terminated or truncated
+    
+            state = torch.tensor(observation, dtype=torch.float32) 
+        """
+        SAVE THE MOVIE, EPISODE NUMBER IN THE FILENAME 
+        """      
+    
+    def train(self, progress=False, make_plots=False, num_episodes = None, log_progress=False, log_progress_interval=0.5):
+        if not num_episodes:
+            if torch.cuda.is_available() or torch.backends.mps.is_available():
+                num_episodes = 600
+            else:
+                num_episodes = 50
 
         iterator = range(num_episodes)
         if progress:
             iterator = tqdm(iterator)
         
         for i_episode in iterator:
+            if log_progress and (np.log2(i_episode) % log_progress_interval == 0):
+                self.run_sim(i_episode)
             cumulative_reward = 0
             # Initialize the environment and get its state
             state, info = self.env.reset()
