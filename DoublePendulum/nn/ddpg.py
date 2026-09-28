@@ -14,8 +14,9 @@ import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
 
-from .nn_common import this_dir, plot_dir, init_env, device, Transition, ReplayMemory
+from .nn_common import this_dir, plot_dir, vid_dir, init_env, device, Transition, ReplayMemory
 
+import imageio
 
 DDPG_policy_pickle = this_dir+"/pickles/ddpg_policy_net.pt"
 DDPG_Q_pickle = this_dir+"/pickles/ddpg_q_net.pt"
@@ -116,8 +117,6 @@ class DDPG_Learner:
                             theta_tol=theta_tol,
                             render_mode="rbg_array")
     
-        
-    
         # BATCH_SIZE is the number of transitions sampled from the replay buffer
         # GAMMA is the discount factor as mentioned in the previous section
         # EPS_START is the starting value of epsilon
@@ -167,21 +166,22 @@ class DDPG_Learner:
         self.final_state_balanced = []
         self.final_state_truncated = []
 
-    def select_action(self, state):
+    def select_action(self, state, do_deterministic=False):
         """
         We deterministically pick an action and add on decaying white noise.
 
         We also want some exploration, so for the first `start_steps` steps, we uniformly sample
         actions from the environment
         """
-        if self.steps_done < self.start_steps:
+        if (self.steps_done < self.start_steps) and (not do_deterministic):
             action = torch.as_tensor(self.env.action_space.sample(), device=device, dtype=torch.float32).view(1, 1)
         else:
             with torch.no_grad():
-                action = self.policy_net(state) 
-                steps_ellapsed = self.steps_done-self.start_steps
-                eps = self.EPS_END + (self.EPS_START - self.EPS_END) * math.exp(-1. * steps_ellapsed / self.EPS_DECAY)
-                action += eps*torch.randn_like(action)
+                action = self.policy_net(state)
+                if not do_deterministic:
+                    steps_ellapsed = self.steps_done-self.start_steps
+                    eps = self.EPS_END + (self.EPS_START - self.EPS_END) * math.exp(-1. * steps_ellapsed / self.EPS_DECAY)
+                    action += eps*torch.randn_like(action)
 
         return torch.clamp(action, float(self.env.action_space.low[0]), float(self.env.action_space.high[0]))
         
@@ -254,27 +254,24 @@ class DDPG_Learner:
         self.policy_optimizer.step()
 
     def run_sim(self, episode_number):
-        state, info = self.env.reset()
+        frames = []
+        state, info = self.log_env.reset()
         state = torch.tensor(state, dtype=torch.float32, device=device).unsqueeze(0)
         done = False
         while not done:
-                # select action based on observed state
-            action = self.select_action(state)
+            # select action based on observed state
+            action = self.select_action(state, do_deterministic=True)
             # take step in environment to get next state, reward, and termination/truncation signals
-            observation, reward, terminated, truncated, _ = self.env.step(action.item())
-            """
-            DO THE MAGIC WHERE WE MAKE THE MOVIE AND PLOT THE REWARD FROM THE LAST STEP
-            """
-            reward = torch.tensor([reward], device=device)
+            observation, reward, terminated, truncated, _ = self.log_env.step(action.item())
+            # HxWx3
+            frame = self.log_env.render(log_reward=True,reward=reward)
+            frames.append(frame)
             # done signal is either terminated or truncated
             done = terminated or truncated
+            state = torch.tensor(observation, dtype=torch.float32)
+        imageio.mimsave(vid_dir+f"/sac_ep{episode_number}.mp4", fps=metadata["render_fps"])
     
-            state = torch.tensor(observation, dtype=torch.float32, device=device).unsqueeze(0) 
-        """
-        SAVE THE MOVIE, EPISODE NUMBER IN THE FILENAME 
-        """   
-    
-    def train(self, progress=False, make_plots=False, num_episodes = None, log_progress=False, log_progress_interval=2):
+    def train(self, progress=False, make_plots=False, num_episodes = None):
 
         if not num_episodes:
             if torch.cuda.is_available() or torch.backends.mps.is_available():
@@ -287,8 +284,9 @@ class DDPG_Learner:
             iterator = tqdm(iterator)
         
         for i_episode in iterator:
-            if log_progress and (np.log2(i_episode) % log_progress_interval == 0):
-                self.run_sim(i_episode)
+            if i_episode > 0:
+                if self.log_env and (np.log2(i_episode) % 1 == 0):
+                    self.run_sim(i_episode)
             cumulative_reward = 0
             # Initialize the environment and get its state
             state, info = self.env.reset()

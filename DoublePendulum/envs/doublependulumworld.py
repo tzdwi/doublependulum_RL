@@ -175,7 +175,7 @@ class DoublePendulumEnv(gym.Env):
         oob = not (np.all(s >= low) & np.all(s <= high))
         return terminate, offtrack, oob
 
-    def render(self):
+    def render(self, log_reward=False, reward=None):
         if self.render_mode is None:
             assert self.spec is not None
             gym.logger.warn(
@@ -236,6 +236,9 @@ class DoublePendulumEnv(gym.Env):
             end_pos=(self.size * scale + offset, 0+offset),
             color=(0, 0, 0),
         )
+
+        if log_reward and reward:
+            self.screen.draw.(f"Reward = {reward}", (-self.size * scale + offset, 0+offset+15)
 
         # Pendulum links
         pygame.draw.line(
