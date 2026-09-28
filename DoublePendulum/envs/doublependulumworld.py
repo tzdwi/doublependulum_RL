@@ -238,7 +238,7 @@ class DoublePendulumEnv(gym.Env):
         )
 
         if log_reward and reward:
-            self.screen.draw.(f"Reward = {reward}", (-self.size * scale + offset, 0+offset+15)
+            self.screen.draw.text(f"Reward = {reward}", (-self.size * scale + offset, 0+offset+15))
 
         # Pendulum links
         pygame.draw.line(

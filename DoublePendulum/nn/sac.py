@@ -116,7 +116,7 @@ class SAC_Learner:
                             l2=l2,
                             dt=dt,
                             theta_tol=theta_tol,
-                            render_mode="rbg_array")
+                            render_mode="rgb_array")
 
         # BATCH_SIZE is the number of transitions sampled from the replay buffer
         # GAMMA is the discount factor 
@@ -184,7 +184,7 @@ class SAC_Learner:
                     act = dist.sample()
                 else:
                     act = action_mu
-                action = self.scale*F.tanh(dist.sample())
+                action = self.scale*F.tanh(act)
 
         return torch.clamp(action, float(self.env.action_space.low[0]), float(self.env.action_space.high[0]))
         
@@ -292,8 +292,8 @@ class SAC_Learner:
             frames.append(frame)
             # done signal is either terminated or truncated
             done = terminated or truncated
-            state = torch.tensor(observation, dtype=torch.float32)
-        imageio.mimsave(vid_dir+f"/sac_ep{episode_number}.mp4", fps=metadata["render_fps"])
+            state = torch.tensor(observation, dtype=torch.float32, device=device).unsqueeze(0)
+        imageio.mimsave(vid_dir+f"/sac_ep{episode_number}.mp4", frames, fps=self.log_env.metadata["render_fps"])
             
     
     def train(self, progress=False, make_plots=False, num_episodes = None):
