@@ -71,6 +71,8 @@ POLICIES = {
 		},
 	}
 
+MODEL_IDS = tuple(POLICIES.keys())
+
 def load(model_id):
 	reg = POLICIES[model_id]
 	net = reg["load"](7)
