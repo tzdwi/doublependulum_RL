@@ -288,7 +288,7 @@ class SAC_Learner:
             # take step in environment to get next state, reward, and termination/truncation signals
             observation, reward, terminated, truncated, _ = self.log_env.step(action.item())
             # HxWx3
-            frame = self.log_env.render(log_reward=True,reward=reward)
+            frame = self.log_env.unwrapped.render(log_reward=True,reward=reward)
             frames.append(frame)
             # done signal is either terminated or truncated
             done = terminated or truncated
@@ -309,7 +309,7 @@ class SAC_Learner:
         
         for i_episode in iterator:
             if i_episode > 0:
-                if self.log_env and (np.log2(i_episode) % 1 == 0):
+                if self.log_env and ((np.log2(i_episode) % 1 == 0) or (i_episode==num_episodes-1)):
                     self.run_sim(i_episode)
             cumulative_reward = 0
             # Initialize the environment and get its state
