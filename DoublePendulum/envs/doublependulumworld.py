@@ -12,7 +12,7 @@ class DoublePendulumEnv(gym.Env):
     SCREEN_DIM = 512
     SUCCESS_TIME = 5 # We'll have won if we get the thing to stand up for 5 seconds
 
-    def __init__(self, render_mode=None, size=5, max_F=5, max_ang_vel=4*np.pi, mm=5.0, m1=1.0, l1=1.0, m2=1.0, l2=1.0, dt=0.03, theta_tol=np.pi/10):
+    def __init__(self, render_mode=None, size=50, max_F=5, max_ang_vel=4*np.pi, mm=5.0, m1=0.5, l1=1.0, m2=0.5, l2=1.0, dt=0.03, theta_tol=np.pi/10):
         self.size = size  # The size of the track
         self.max_F = max_F # maximum applied F in Neutons
         self.max_ang_vel = max_ang_vel # we'll allow the second pendulum to go faster though 

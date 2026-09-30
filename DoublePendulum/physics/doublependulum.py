@@ -9,9 +9,9 @@ class DoublePendulum:
     """
     
     def __init__(self, 
-                 mm : float = 1.0, 
-                 m1 : float = 1.0, 
-                 m2 : float = 1.0, 
+                 mm : float = 5.0, 
+                 m1 : float = 0.5, 
+                 m2 : float = 0.5, 
                  l1 : float = 1.0, 
                  l2 : float = 1.0,
                  theta1_init : float | None = None,
