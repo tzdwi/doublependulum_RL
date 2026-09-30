@@ -84,6 +84,13 @@ class DoublePendulumEnv(gym.Env):
         # Reset the pendulum
         self.pendulum._initialize(seed=seed)
 
+        # Optionally make the pendulum perfectly balanced
+        # if we're running the demo
+        if options and options.get("balanced"):
+            self.pendulum.x[:] = 0
+            self.pendulum.x[1] = np.pi
+            self.pendulum.x[2] = np.pi
+
         # Set agent force to 0
         self._agent_location = 0.0
 
@@ -237,9 +244,6 @@ class DoublePendulumEnv(gym.Env):
             color=(0, 0, 0),
         )
 
-        if log_reward and reward:
-            self.screen.draw.text(f"Reward = {reward}", (-self.size * scale + offset, 0+offset+15))
-
         # Pendulum links
         pygame.draw.line(
             surf,
@@ -275,6 +279,12 @@ class DoublePendulumEnv(gym.Env):
 
         surf = pygame.transform.flip(surf, False, True)
         self.screen.blit(surf, (0, 0))
+
+        if log_reward and reward is not None:
+            if not pygame.font.get_init():
+                pygame.font.init()
+            font = pygame.font.Font(None, 24)
+            self.screen.blit(font.render(f"Reward = {reward:.3f}", True, (0, 0, 0)), (10, 10))
 
         if self.render_mode == "human":
             pygame.event.pump()

@@ -16,7 +16,7 @@ this_dir = str(os.path.dirname(os.path.realpath(__file__)))
 plot_dir = str(Path(__file__).parent.parent.parent)+"/scripts/figures"
 vid_dir = str(Path(__file__).parent.parent.parent)+"/scripts/videos"
 
-def init_env(size=5, max_F=5, max_ang_vel=4*np.pi, mm=5.0, m1=1.0, l1=1.0, m2=1.0, l2=1.0, dt=0.03, theta_tol=np.pi/10):
+def init_env(size=5, max_F=5, max_ang_vel=4*np.pi, mm=5.0, m1=1.0, l1=1.0, m2=1.0, l2=1.0, dt=0.03, theta_tol=np.pi/10, render_mode=None):
     max_episode_steps = int(max_seconds / dt)
     env = gym.make("DoublePendulum/DoublePendulum-v0",
                    max_episode_steps=max_episode_steps,
