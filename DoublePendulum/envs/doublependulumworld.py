@@ -9,10 +9,10 @@ from ..physics.doublependulum import DoublePendulum
 
 class DoublePendulumEnv(gym.Env):
     metadata = {"render_modes": ["human", "rgb_array"], "render_fps": int(1/0.03)}
-    SCREEN_DIM = 512
+    SCREEN_DIM = 720
     SUCCESS_TIME = 5 # We'll have won if we get the thing to stand up for 5 seconds
 
-    def __init__(self, render_mode=None, size=50, max_F=5, max_ang_vel=4*np.pi, mm=5.0, m1=0.5, l1=1.0, m2=0.5, l2=1.0, dt=0.03, theta_tol=np.pi/10):
+    def __init__(self, render_mode=None, size=50, max_F=25.0, max_ang_vel=4*np.pi, mm=5.0, m1=0.5, l1=10.0, m2=0.5, l2=10.0, dt=0.03, theta_tol=np.pi/10):
         self.size = size  # The size of the track
         self.max_F = max_F # maximum applied F in Neutons
         self.max_ang_vel = max_ang_vel # we'll allow the second pendulum to go faster though 
@@ -33,6 +33,9 @@ class DoublePendulumEnv(gym.Env):
         self.l1 = l1
         self.l2 = l2
 
+        # at current defaults, speed scale is ~3.333 m/s
+        self.speed_scale = 0.01*np.mean([self.l1, self.l2])/self.dt
+
         self.pendulum = DoublePendulum(mm=mm, m1=m1, m2=m2, l1=l1, l2=l2, dt=dt)
         self._agent_location=0.0
         self.state = self._get_obs()
@@ -52,8 +55,8 @@ class DoublePendulumEnv(gym.Env):
         low = -high
         self.observation_space = spaces.Box(low=low, high=high, dtype=np.float64)
 
-        # We can either add or subtract to the current force by at most 0.5 N on either side
-        self.action_space = spaces.Box(-0.5, 0.5, shape=(1,))
+        # We can either add or subtract to the current force by at most 10 N on either side
+        self.action_space = spaces.Box(-10., 10., shape=(1,))
 
         self.success_frames = 0
 
@@ -119,26 +122,33 @@ class DoublePendulumEnv(gym.Env):
 
         observation = self._get_obs()
         self.state = observation
-        
+
         # An episode is done iff the pendulum is vertical,
         # and all velocities are < 0.1% of the relevant velocity
         # scale (average pendulum length / dt)
         terminated, offtrack, oob = self._terminate_offtrack_or_oob()
+
         if terminated:
             reward = 1000
         elif offtrack:
-            reward = -100
-            terminated = True
-        elif oob:
-            reward = -10
+            reward = -2.5
+            # clip the pendulum to the track and reverse its momentum
+            self.pendulum.bounce(rail_pos=self.size)
+            observation = self._get_obs()
+            self.state = observation
+        #elif oob:
+        #    reward = -10.0
+        #    gonna see how we perform without this    
         else:
-            dist = self._distance()
-            norm = np.linalg.norm(dist)
-            if norm < 1:
-                power = 2.0
+            # reward for being closer to vertical
+            up = -np.cos(observation[1]) - np.cos(observation[2])
+            # speed penalty, saturates to -1
+            speed = np.tanh(np.linalg.norm(observation[3:6])/self.speed_scale)
+            if oob:
+                speed *= 0.5
             else:
-                power = 1.0
-            reward = -0.1*np.linalg.norm(dist)**power
+                speed *= 0.1
+            reward = up - speed
         
         info = {}
 
@@ -217,7 +227,7 @@ class DoublePendulumEnv(gym.Env):
         s = self.state
         cartesian_coords = self.pendulum.transform_cartesian()
 
-        bound = self.l1 + self.l2 + 0.2 + self.size # 7.2 for default
+        bound = self.l1 + self.l2 + 0.2 + self.size # 52.2 for default
         scale = self.SCREEN_DIM / (bound * 2) # pixels/meter
         offset = self.SCREEN_DIM / 2 # used to transform 0,0 (cartesian) to pix
 
@@ -259,8 +269,10 @@ class DoublePendulumEnv(gym.Env):
             color=(0, 0, 0),
         )
 
-        # Our cart
-        l, r, t, b = int(-0.1*scale), int(0.1*scale), int(0.1*scale), int(-0.1*scale)
+        # Our cart is 5% of the size of the track
+        cart_size = 0.05*self.size*scale
+        ball_size = 0.025*self.size*scale
+        l, r, t, b = int(-cart_size), int(cart_size), int(cart_size), int(-cart_size)
         coords = [(l, b), (l, t), (r, t), (r, b)]
         transformed_coords = []
         for coord in coords:
@@ -274,8 +286,8 @@ class DoublePendulumEnv(gym.Env):
         for (x, y) in xys:
             x = x + offset
             y = y + offset
-            gfxdraw.aacircle(surf, int(x), int(y), int(0.1 * scale), (204, 204, 0))
-            gfxdraw.filled_circle(surf, int(x), int(y), int(0.1 * scale), (204, 204, 0))
+            gfxdraw.aacircle(surf, int(x), int(y), int(ball_size), (204, 204, 0))
+            gfxdraw.filled_circle(surf, int(x), int(y), int(ball_size), (204, 204, 0))
 
         surf = pygame.transform.flip(surf, False, True)
         self.screen.blit(surf, (0, 0))

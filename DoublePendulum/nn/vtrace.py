@@ -72,15 +72,16 @@ class SAC_Q_DP(nn.Module):
 
 
 class SAC_Learner:
+	FIX DEFAULTS
     def __init__(self, 
-                 size=50, 
+                 size=5, 
                  max_F=25.0, 
                  max_ang_vel=4*np.pi, 
                  mm=5.0, 
-                 m1=0.5, 
-                 l1=10.0, 
-                 m2=0.5, 
-                 l2=10.0, 
+                 m1=1.0, 
+                 l1=1.0, 
+                 m2=1.0, 
+                 l2=1.0, 
                  dt=0.03, 
                  theta_tol=np.pi/10,
                  batch_size=128,

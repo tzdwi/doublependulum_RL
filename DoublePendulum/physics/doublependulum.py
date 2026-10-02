@@ -100,6 +100,10 @@ class DoublePendulum:
                 theta -= 2*np.pi
             if changed:
                 self.x[i] = theta
+    
+    def bounce(self, rail_pos=50.0):
+        self.x[3] = -self.x[3]
+        self.x[0] = np.clip(self.x[0], -rail_pos, rail_pos)
 
     def D(self):
         out = np.array([[self.d11, self.d12_part*np.cos(self.x[1]), self.d13_part*np.cos(self.x[2])],

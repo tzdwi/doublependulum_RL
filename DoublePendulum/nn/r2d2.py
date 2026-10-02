@@ -1,5 +1,5 @@
 """
-We're going to be training a Soft Actor-Critic
+We're going to be training a Recurrent Replay Distributed DQN (R2D2; https://openreview.net/pdf?id=r1lyTjAqYX) policy 
 """
 import math
 import random
@@ -18,6 +18,8 @@ from .nn_common import this_dir, plot_dir, vid_dir, init_env, device, Transition
 
 import imageio
 
+# START HERE:
+
 SAC_policy_pickle = this_dir+"/pickles/sac_policy_net.pt"
 SAC_Q1_pickle = this_dir+"/pickles/sac_q1_net.pt"
 SAC_Q2_pickle = this_dir+"/pickles/sac_q2_net.pt"
@@ -27,19 +29,18 @@ SAC_CUM_REWARDS_FIG = plot_dir+"/sac_cum_rewards.png"
 SAC_BALANCED_FIG = plot_dir+"/sac_balanced.png"
 SAC_TRUNCATED_FIG = plot_dir+"/sac_truncated.png"
 
-class SAC_POLICY_DP(nn.Module):
+class R2D2_POLICY_DP(nn.Module):
     """
-    Our goal is to learn a function pi(s) to output a _distribution_ over 
-    actions, conditioned on the state, s. The selected action is then drawn
-    from that distribution conditioned on s, in which case our outputs
-    are a mean action, and a (log) standard deviation. Note, unlike
-    DDPG, we are going to squash the output downstream, so no tanh constraint.
+    TO DO
     """
     def __init__(self, n_observations,):
         super(SAC_POLICY_DP, self).__init__()
         self.layer1 = nn.Linear(n_observations, 128)
-        self.layer2 = nn.Linear(128, 128)
-        self.layer3 = nn.Linear(128, 2)
+        self.layer2 = nn.Linear(128, 256)
+        self.layer3 = nn.Linear(256, 512)
+		self.core = nn.LSTM(512,512)
+		self.value 
+		self.advantage
         self.activation = nn.Softplus()
 
     # Called with either one element to determine next action, or a batch
@@ -73,14 +74,15 @@ class SAC_Q_DP(nn.Module):
 
 class SAC_Learner:
     def __init__(self, 
-                 size=50, 
+	FIX DEFAULTS
+                 size=5, 
                  max_F=25.0, 
                  max_ang_vel=4*np.pi, 
                  mm=5.0, 
-                 m1=0.5, 
-                 l1=10.0, 
-                 m2=0.5, 
-                 l2=10.0, 
+                 m1=1.0, 
+                 l1=1.0, 
+                 m2=1.0, 
+                 l2=1.0, 
                  dt=0.03, 
                  theta_tol=np.pi/10,
                  batch_size=128,
