@@ -313,7 +313,7 @@ class CrossQ_Learner:
             # done signal is either terminated or truncated
             done = terminated or truncated
             state = torch.tensor(observation, dtype=torch.float32, device=device).unsqueeze(0)
-        imageio.mimsave(vid_dir+f"/sac_ep{episode_number}.mp4", frames, fps=self.log_env.metadata["render_fps"])
+        imageio.mimsave(vid_dir+f"/crossq_ep{episode_number}.mp4", frames, fps=self.log_env.metadata["render_fps"])
             
     
     def train(self, progress=False, make_plots=False, num_episodes = None):
