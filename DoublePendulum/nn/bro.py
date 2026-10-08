@@ -58,14 +58,19 @@ class BroNet(nn.Module):
     """
     The actual Bro Net!
     """
-    def __init__(self, dim_in=8, dim_out=100, dim_block=256, dim_hid=256, N_block=2, activation='relu'):
+    def __init__(self, dim_in=8, dim_out=100, dim_block=256, dim_hid=256, N_block=2, activation='relu', tiny_outs=False):
         super(BroNet, self).__init__()
         self.dense_in = nn.Linear(dim_in, dim_block)
         self.norm_in = nn.LayerNorm(dim_block)
         self.blocks = [BRO_Block(dim_in=dim_block, dim_hid=dim_hid, activation=activation) for i in range(N_block)]
         if activation == 'relu':
             self.activation = nn.ReLU()
-        self.dense_out = nn.Linear(dim_block, dim_out)
+        if tiny_outs:
+            self.dense_out = nn.Linear(dim_block, dim_out, bias=False)
+            nn.init.normal_(self.dense_out.weight, std=1e-2*self.dense_out.weight.std().item())
+        else:
+            self.dense_out = nn.Linear(dim_block, dim_out)
+
         self.layers = nn.ModuleList([self.dense_in, self.norm_in, self.activation, *self.blocks, self.dense_out])
 
     def forward(self, x):
@@ -104,6 +109,7 @@ class BRO_Learner:
                  polyak=0.995,
                  start_steps=256,
                  buffer_length=1e6,
+                 reset_steps = [15001,50001,250000],
                  log_progress=False):
 
         self.env = init_env(size=size,
@@ -137,16 +143,16 @@ class BRO_Learner:
         # ALPHA is the regularization term/temperature for the entropy,
         # and is a learnable parameter!
         # BETA is the optimism of the policy, and is learnable as well!
-        # TAU is the weight on the KL divergence
+        # TAU is the weight on the KL divergence, also learnable!
         # LR is the learning rate of the ``AdamW`` optimizers
         # POLYAK is the polyak averaging term
         # PESSIMISM is a fixed parameter, takes away from BETA steps
         
         self.BATCH_SIZE = batch_size
         self.GAMMA = gamma
-        self.LOGALPHA = nn.parameter.Parameter(torch.log(torch.tensor(alpha_init, device=device)))
-        self.LOGBETA = nn.parameter.Parameter(torch.log(torch.tensor(beta_init, device=device)))
-        self.LOGTAU = nn.parameter.Parameter(torch.log(torch.tensor(tau_init, device=device)))
+        self._alpha_init = alpha_init
+        self._beta_init = beta_init
+        self._tau_init = tau_init
         self.LR = learning_rate
         self.KL_TARGET = KL_target
         self.POLYAK = polyak
@@ -155,30 +161,52 @@ class BRO_Learner:
         # Get the number of state observations
         state, info = self.env.reset()
         self.state = state
-        n_observations = len(state)
+        self.n_observations = len(state)
         self.scale = float(self.env.action_space.high[0])
 
         self.target_entropy = -target_entropy*float(self.env.action_space.shape[0])
 
-        # Nets to predict the next action, keep it as the SAC!
-        self.optimistic_net =BroNet(dim_in=n_observations, dim_out=1,dim_block=dim_block,dim_hid=dim_hid,N_block=N_block).to(device)
-        self.pessimistic_net = BroNet(dim_in=n_observations, dim_out=2,dim_block=dim_block,dim_hid=dim_hid,N_block=N_block).to(device)
+        # Network params
+        self.dim_block = dim_block
+        self.dim_hid = dim_hid
+        self.N_block = N_block 
         self.std_mult = std_mult
-
-        # Net to predict the reward for the next action;
-        # BRO uses two like SAC, but averages them! 
         self.num_quantiles = num_quantiles
         self.bin_centers = ((0.5 + torch.arange(self.num_quantiles, device=device, dtype=torch.float32))/self.num_quantiles).unsqueeze(0).unsqueeze(-1)
 
-        self.Q_net_1 = BroNet(dim_in=n_observations+1,dim_out=num_quantiles,dim_block=dim_block,dim_hid=dim_hid,N_block=N_block).to(device)
-        self.Q_target_1 = BroNet(dim_in=n_observations+1,dim_out=num_quantiles,dim_block=dim_block,dim_hid=dim_hid,N_block=N_block).to(device)
+        self.initialize_params()
+        
+        self.memory = ReplayMemory(int(buffer_length))
+    
+        self.steps_done = 0
+        self.start_steps = max(start_steps, 2*self.BATCH_SIZE)
+        self.replay_ratio = replay_ratio
+        self.reset_steps = reset_steps
+        
+        self.episode_durations = []
+        self.cumulative_rewards = []
+        self.final_state_balanced = []
+        self.final_state_truncated = []
+
+    def initialize_params(self):
+        # learned scalars
+        self.LOGALPHA = nn.parameter.Parameter(torch.log(torch.tensor(self._alpha_init, device=device)))
+        self.LOGBETA = nn.parameter.Parameter(torch.log(torch.tensor(self._beta_init, device=device)))
+        self.LOGTAU = nn.parameter.Parameter(torch.log(torch.tensor(self._tau_init, device=device)))
+
+        #nets and targets
+        self.optimistic_net =BroNet(dim_in=self.n_observations+1, dim_out=1,dim_block=self.dim_block,dim_hid=self.dim_hid,N_block=self.N_block,tiny_outs=True).to(device)
+        self.pessimistic_net = BroNet(dim_in=self.n_observations, dim_out=2,dim_block=self.dim_block,dim_hid=self.dim_hid,N_block=self.N_block).to(device)
+
+        self.Q_net_1 = BroNet(dim_in=self.n_observations+1,dim_out=self.num_quantiles,dim_block=self.dim_block,dim_hid=self.dim_hid,N_block=self.N_block).to(device)
+        self.Q_target_1 = BroNet(dim_in=self.n_observations+1,dim_out=self.num_quantiles,dim_block=self.dim_block,dim_hid=self.dim_hid,N_block=self.N_block).to(device)
         self.Q_target_1.load_state_dict(self.Q_net_1.state_dict())
 
-        self.Q_net_2 = BroNet(dim_in=n_observations+1,dim_out=num_quantiles,dim_block=dim_block,dim_hid=dim_hid,N_block=N_block).to(device)
-        self.Q_target_2 = BroNet(dim_in=n_observations+1,dim_out=num_quantiles,dim_block=dim_block,dim_hid=dim_hid,N_block=N_block).to(device)
+        self.Q_net_2 = BroNet(dim_in=self.n_observations+1,dim_out=self.num_quantiles,dim_block=self.dim_block,dim_hid=self.dim_hid,N_block=self.N_block).to(device)
+        self.Q_target_2 = BroNet(dim_in=self.n_observations+1,dim_out=self.num_quantiles,dim_block=self.dim_block,dim_hid=self.dim_hid,N_block=self.N_block).to(device)
         self.Q_target_2.load_state_dict(self.Q_net_2.state_dict())
         
-
+        #optimizers
         self.Q_optimizer = optim.AdamW([{"params":self.Q_net_1.parameters()},
                                        {"params":self.Q_net_2.parameters()}],
                                        lr=self.LR,weight_decay=1e-4)
@@ -186,20 +214,9 @@ class BRO_Learner:
         self.optimistic_optimizer = optim.AdamW(self.optimistic_net.parameters(), lr=self.LR, amsgrad=True, weight_decay=1e-4)
         self.pessimistic_optimizer = optim.AdamW(self.pessimistic_net.parameters(), lr=self.LR, amsgrad=True, weight_decay=1e-4)
 
-        self.temperature_optimizer = optim.AdamW([self.LOGALPHA], lr=self.LR, amsgrad=True, weight_decay=1e-4)
-        self.optimism_optimizer = optim.AdamW([self.LOGBETA], lr=0.1*self.LR, amsgrad=True, weight_decay=1e-4)
-        self.tau_optimizer = optim.AdamW([self.LOGTAU], lr=0.1*self.LR, amsgrad=True, weight_decay=1e-4)
-        
-        self.memory = ReplayMemory(int(buffer_length))
-    
-        self.steps_done = 0
-        self.start_steps = max(start_steps, 2*self.BATCH_SIZE)
-        self.replay_ratio = replay_ratio
-        
-        self.episode_durations = []
-        self.cumulative_rewards = []
-        self.final_state_balanced = []
-        self.final_state_truncated = []
+        self.temperature_optimizer = optim.Adam([self.LOGALPHA], lr=self.LR, amsgrad=True, betas=(0.5,0.999))
+        self.optimism_optimizer = optim.Adam([self.LOGBETA], lr=0.1*self.LR, amsgrad=True, betas=(0.5,0.999))
+        self.tau_optimizer = optim.Adam([self.LOGTAU], lr=0.1*self.LR, amsgrad=True, betas=(0.5,0.999))
 
     @property
     def temp(self):
@@ -244,7 +261,8 @@ class BRO_Learner:
             with torch.no_grad():
                 action_mu, action_logsig = self.pessimistic_net(state).chunk(2, dim=-1)
                 if do_optimistic:
-                    shift = self.optimistic_net(state)
+                    x = torch.cat((state, action_mu), dim=-1)
+                    shift = self.optimistic_net(x)
                     action_mu += shift
                     action_logsig += np.log(self.std_mult)
                 if not do_deterministic:
@@ -352,7 +370,8 @@ class BRO_Learner:
 
         # Step 6: Calculate optimistic actor value
 
-        opt_action_shift = self.optimistic_net(state_batch)
+        x = torch.concat((state_batch, pes_action_mus.detach()), dim=-1)
+        opt_action_shift = self.optimistic_net(x)
         opt_action_mus = pes_action_mus.detach() + opt_action_shift
         opt_action_logsigmas = pes_action_logsigmas.detach() + np.log(self.std_mult)
         opt_action_logsigmas = opt_action_logsigmas.clamp(-20, 2)
@@ -484,9 +503,13 @@ class BRO_Learner:
                 state = next_state
 
                 if len(self.memory) > self.start_steps:
+                    if (self.steps_done in self.reset_steps) or ((self.steps_done != 0) and (self.steps_done % self.reset_steps[-1] == 0)):
+                        #reset
+                        self.initialize_params()
         
                     for i in range(self.replay_ratio):
                         self.optimize_model()
+                
         
                 if done:
                     self.episode_durations.append(t + 1)
@@ -500,6 +523,8 @@ class BRO_Learner:
                     else:
                         self.final_state_truncated.append(0)
                     break
+            
+                
         if make_plots:
             fig = plt.figure(dpi=300)
             plt.plot(np.arange(num_episodes), self.episode_durations)
