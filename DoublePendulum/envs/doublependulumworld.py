@@ -93,6 +93,8 @@ class DoublePendulumEnv(gym.Env):
             self.pendulum.x[:] = 0
             self.pendulum.x[1] = np.pi
             self.pendulum.x[2] = np.pi
+            self.pendulum.x[4] = 0.0
+            self.pendulum.x[5] = 0.0
 
         # Set agent force to 0
         self._agent_location = 0.0
@@ -123,40 +125,66 @@ class DoublePendulumEnv(gym.Env):
         observation = self._get_obs()
         self.state = observation
 
+        # Calculate reward, ala default gymansium double pendulum
+        reward = 0.0
+        terminated = False
+        info = {"alive_bonus":0.0,"distance_penalty":0.0,"velocity_penalty":0.0,"success":False,"oob":False,"offtrack":False}
+        # step 0: did we succeed?
         # An episode is done iff the pendulum is vertical,
-        # and all velocities are < 0.1% of the relevant velocity
-        # scale (average pendulum length / dt)
-        terminated, offtrack, oob = self._terminate_offtrack_or_oob()
-
-        if terminated:
-            reward = 1000
-        elif offtrack:
+        # all velocities are < 0.1% of the relevant velocity
+        # scale (average pendulum length / dt),
+        # and we've been standing still for sufficient time
+        success, offtrack, oob = self._success_offtrack_or_oob() 
+        info["success"] = success
+        info["offtrack"] = offtrack
+        if offtrack:
             reward = -2.5
             # clip the pendulum to the track and reverse its momentum
             self.pendulum.bounce(rail_pos=self.size)
             observation = self._get_obs()
             self.state = observation
-        #elif oob:
-        #    reward = -10.0
-        #    gonna see how we perform without this    
+        info["oob"] = oob
+        if success: 
+            reward += 1000
+            terminated = True
+            if self.render_mode == "human":
+                self.render()
+            
+            return self._clip_obs(observation), reward, terminated, False, info
+
+        # step 1: alive bonus; is the pendulum healthy?
+        if self.healthy:
+            reward += 10.0
+            info["alive_bonus"] = 10.0
         else:
-            # reward for being closer to vertical
-            up = -np.cos(observation[1]) - np.cos(observation[2])
-            # speed penalty, saturates to -1
-            speed = np.tanh(np.linalg.norm(observation[3:6])/self.speed_scale)
-            if oob:
-                speed *= 0.5
-            else:
-                speed *= 0.1
-            reward = up - speed
-        
-        info = {}
+            terminated = True
+
+        # coordinate-based penalties
+        cart_coord = self.pendulum.transform_cartesian(do_vels=True)
+        # step 2: distance penalty
+        distance = 0.01 * (cart_coord[2][0]/(self.l1+self.l2)) ** 2.0 + (cart_coord[2][1]/(self.l1+self.l2) - 2)**2.0
+        info["distance_penalty"] = distance
+        reward -= distance
+
+        #step 3: velocity penalty
+        velocity = 1e-3*abs(observation[4]) + 5e-3*abs(observation[5])
+        info["velocity_penalty"] = velocity
+        reward -= velocity
 
         if self.render_mode == "human":
             self.render()
 
         return self._clip_obs(observation), reward, terminated, False, info
     
+    @property
+    def healthy(self):
+        # We're healthy if the second head is above the first
+        # and both are above 0.5 * l1
+        cart_coord = self.pendulum.transform_cartesian(do_vels=True)
+        y2 = cart_coord[2][1]
+        y1 = cart_coord[1][1]
+        return (y2 >= y1) and (y1 >= 0.5*self.l1)
+
     def _distance(self):
         raw_dist = self.state[1:6] - self._target_loc
         raw_dist[0] = np.atan2(np.sin(raw_dist[0]), np.cos(raw_dist[0]))
@@ -182,15 +210,15 @@ class DoublePendulumEnv(gym.Env):
             self.success_frames = 0
         return s
 
-    def _terminate_offtrack_or_oob(self):
+    def _success_offtrack_or_oob(self):
         s = self._increment_success_frames_or_reset()
-        terminate = self.success_frames * self.dt >= self.SUCCESS_TIME
+        success = self.success_frames * self.dt >= self.SUCCESS_TIME
         pos = s[0]
         offtrack = np.abs(pos) > self.size
         low = self.observation_space.low
         high = self.observation_space.high
         oob = not (np.all(s >= low) & np.all(s <= high))
-        return terminate, offtrack, oob
+        return success, offtrack, oob
 
     def render(self, log_reward=False, reward=None):
         if self.render_mode is None:

@@ -75,8 +75,10 @@ class DoublePendulum:
         rng = np.random.default_rng(seed)
         self.t = 0
         init_arr = np.zeros(6) # x_m, theta_1, theta_2, then time derivatives
-        init_arr[1] = np.pi+0.01*rng.normal() #random
-        init_arr[2] = np.pi+0.01*rng.normal()
+        init_arr[1] = np.pi+0.01*rng.uniform(-1, 1) #random
+        init_arr[2] = np.pi+0.01*rng.uniform(-1, 1)
+        init_arr[4] = 0.0001*rng.normal()
+        init_arr[5] = 0.0001*rng.normal()
         self.x = init_arr
         self._validate_state_arr()
         self._make_system()
