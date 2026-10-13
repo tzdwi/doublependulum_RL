@@ -89,7 +89,7 @@ class SAC_Learner:
                  batch_size=128,
                  gamma=0.99,
                  tau=0.995,
-                 alpha=0.2,
+                 alpha=0.01,
                  learning_rate=3e-4,
                  policy_delay=2,
                  actor_holdback=20000,
@@ -126,7 +126,7 @@ class SAC_Learner:
         # BATCH_SIZE is the number of transitions sampled from the replay buffer
         # GAMMA is the discount factor 
         # TAU is the update rate of the target networks for polyak averaging
-        # ALPHA is the regularization term for the entropy
+        # alpha is the initial value of the learned entropy temperature
         # LR is the learning rate of the ``AdamW`` optimizer
         
         self.BATCH_SIZE = batch_size
@@ -134,7 +134,6 @@ class SAC_Learner:
         self.actor_holdback = actor_holdback
         self.GAMMA = gamma
         self.TAU = tau
-        self.ALPHA = alpha
         self.LR = learning_rate
         
         # Get the number of state observations
@@ -142,6 +141,11 @@ class SAC_Learner:
         self.state = state
         n_observations = len(state)
         self.scale = float(self.env.action_space.high[0])
+
+        self.log_alpha = torch.tensor(math.log(alpha), device=device, requires_grad=True)
+        self.alpha_optimizer = optim.Adam([self.log_alpha], lr=self.LR)
+        # -dim(A) in [-1, 1] action units; logprobs here are in force units, hence the log(scale) shift.
+        self.target_entropy = math.log(self.scale) - 1.0
 
         # Net to predict the next action
         self.policy_net = SAC_POLICY_DP(n_observations).to(device)
@@ -249,7 +253,7 @@ class SAC_Learner:
                 Qs = torch.cat([Q_target(target_input) for Q_target in [self.Q_target_1, self.Q_target_2]], dim=-1)
                 selected = torch.min(Qs, dim=-1).values
                 
-                next_state_values[non_final_mask] = self.GAMMA*(selected-self.ALPHA*logprobs)
+                next_state_values[non_final_mask] = self.GAMMA*(selected-self.log_alpha.exp()*logprobs)
 
         targets = reward_batch+next_state_values
     
@@ -279,12 +283,17 @@ class SAC_Learner:
         Qs = torch.cat([Q_net(Q_in) for Q_net in [self.Q_net_1, self.Q_net_2]], dim=-1)
         selected = torch.min(Qs, dim=-1).values
         # we want gradient _ascent_ so we use the negative of the sum of action values
-        loss = -(selected-self.ALPHA*logprobs).sum()/self.BATCH_SIZE
+        loss = -(selected-self.log_alpha.exp().detach()*logprobs).sum()/self.BATCH_SIZE
         self.policy_optimizer.zero_grad()
         loss.backward()
         # In-place gradient clipping
         torch.nn.utils.clip_grad_value_(self.policy_net.parameters(), 100)
         self.policy_optimizer.step()
+
+        alpha_loss = -(self.log_alpha * (logprobs.detach() + self.target_entropy)).mean()
+        self.alpha_optimizer.zero_grad()
+        alpha_loss.backward()
+        self.alpha_optimizer.step()
 
     def run_sim(self, episode_number):
         frames = []
