@@ -105,7 +105,7 @@ class CrossQ_Learner:
                  gamma=0.99,
                  alpha=0.2,
                  learning_rate=1e-3,
-                 start_steps=256,
+                 start_steps=2000,
                  buffer_length=1e6,
                  policy_delay=3,
                  log_progress=False):
@@ -342,7 +342,7 @@ class CrossQ_Learner:
                 # select action based on observed state
                 action = self.select_action(state)
                 # take step in environment to get next state, reward, and termination/truncation signals
-                observation, reward, terminated, truncated, _ = self.env.step(action.item())
+                observation, reward, terminated, truncated, info = self.env.step(action.item())
                 self.steps_done += 1
                 cumulative_reward += reward
                 reward = torch.tensor([reward], device=device)
@@ -371,7 +371,7 @@ class CrossQ_Learner:
                 if done:
                     self.episode_durations.append(t + 1)
                     self.cumulative_rewards.append(cumulative_reward)
-                    if reward == 1000:
+                    if info["success"]:
                         self.final_state_balanced.append(1)
                     else:
                         self.final_state_balanced.append(0)

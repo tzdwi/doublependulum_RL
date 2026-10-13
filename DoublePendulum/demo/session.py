@@ -62,12 +62,12 @@ class Session:
 			obs = torch.tensor(obs, device=device, dtype=torch.float32).unsqueeze(0)
 			with torch.no_grad():
 				action = self.action(obs, self.policy)
-			observation, reward, terminated, truncated, _ = self.env.step(action.item())
+			observation, reward, terminated, truncated, info = self.env.step(action.item())
 			if terminated or truncated:
 				self.playing = False
-			if reward == 1000:
+			if info["success"]:
 				status = "balanced"
-			elif reward == -100:
+			elif info["offtrack"]:
 				status = "off_track"
 			elif truncated:
 				status = "timeout"

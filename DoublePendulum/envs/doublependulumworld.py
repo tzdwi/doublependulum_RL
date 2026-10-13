@@ -81,19 +81,19 @@ class DoublePendulumEnv(gym.Env):
         # now lets scale our raw state into a helpful observation
         # that is bounded in all dimensions to -1, 1
         # cart pos scaled to rail size
-        # thetas wrapped around pi, scaled by pi
+        # thetas wrapped around pi, scaled by pi/4
         # cart velocity relative to the speed scale defined by the physics
-        # angular velocities relative to the max initialized vel
+        # angular velocities scaled by pi
         # foce relative to the max
         state = self._get_state()
         obs = np.array(
             [
                 state[0] / self.size,
-                np.arctan2(np.sin(state[1] - np.pi), np.cos(state[1] - np.pi)) / np.pi,
-                np.arctan2(np.sin(state[2] - np.pi), np.cos(state[2] - np.pi)) / np.pi,
+                np.arctan2(np.sin(state[1] - np.pi), np.cos(state[1] - np.pi)) / (np.pi / 4),
+                np.arctan2(np.sin(state[2] - np.pi), np.cos(state[2] - np.pi)) / (np.pi / 4),
                 state[3] / self.speed_scale,
-                state[4] / self.max_ang_vel,
-                state[5] / self.max_ang_vel,
+                state[4] / np.pi,
+                state[5] / np.pi,
                 state[6] / self.max_F,
             ],
             dtype=np.float32,
@@ -165,8 +165,12 @@ class DoublePendulumEnv(gym.Env):
             + 0.01 * (self.state[4] / self.max_ang_vel) ** 2.0
             + 0.01 * (self.state[5] / self.max_ang_vel) ** 2.0
         )
+        theta1_err = np.arctan2(np.sin(self.state[1] - np.pi), np.cos(self.state[1] - np.pi))
+        theta2_err = np.arctan2(np.sin(self.state[2] - np.pi), np.cos(self.state[2] - np.pi))
+        tilt_penalty = 0.1 * min(1.0, (theta1_err**2 + theta2_err**2) / (2 * self.theta_tol**2))
         control_penalty = 0.001 * (self.state[6] / self.max_F) ** 2.0
-        failure_penalty = 0.0 if success or self.healthy else 1.0
+        # Must be at least the capped tilt penalty / (1 - gamma), so falling is never the cheaper option.
+        failure_penalty = 0.0 if success or self.healthy else 10.0
         offtrack_penalty = 1.0 if offtrack else 0.0
         success_bonus = 10.0 if success else 0.0
         if success or failure_penalty:
@@ -175,6 +179,7 @@ class DoublePendulumEnv(gym.Env):
         info = {
             "distance_penalty": float(distance_penalty),
             "velocity_penalty": float(velocity_penalty),
+            "tilt_penalty": float(tilt_penalty),
             "control_penalty": float(control_penalty),
             "failure_penalty": float(failure_penalty),
             "offtrack_penalty": float(offtrack_penalty),
@@ -186,6 +191,7 @@ class DoublePendulumEnv(gym.Env):
         reward = (
             -info["distance_penalty"]
             -info["velocity_penalty"]
+            -info["tilt_penalty"]
             -info["control_penalty"]
             -info["failure_penalty"]
             -info["offtrack_penalty"]

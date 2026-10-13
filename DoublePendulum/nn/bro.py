@@ -107,7 +107,7 @@ class BRO_Learner:
                  target_entropy=0.5,
                  KL_target=0.05,
                  polyak=0.995,
-                 start_steps=256,
+                 start_steps=2000,
                  buffer_length=1e6,
                  reset_steps = [15001,50001,250000],
                  log_progress=False):
@@ -487,7 +487,7 @@ class BRO_Learner:
                 # select action based on observed state
                 action = self.select_action(state, do_optimistic=True)
                 # take step in environment to get next state, reward, and termination/truncation signals
-                observation, reward, terminated, truncated, _ = self.env.step(action.item())
+                observation, reward, terminated, truncated, info = self.env.step(action.item())
                 self.steps_done += 1
                 cumulative_reward += reward
                 reward = torch.tensor([reward], device=device)
@@ -517,7 +517,7 @@ class BRO_Learner:
                 if done:
                     self.episode_durations.append(t + 1)
                     self.cumulative_rewards.append(cumulative_reward)
-                    if reward == 1000:
+                    if info["success"]:
                         self.final_state_balanced.append(1)
                     else:
                         self.final_state_balanced.append(0)

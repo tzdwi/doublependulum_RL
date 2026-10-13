@@ -86,7 +86,9 @@ class DDPG_Learner:
                  gamma=0.99,
                  tau=0.995,
                  learning_rate=3e-4,
-                 start_steps=256,
+                 policy_delay=2,
+                 actor_holdback=20000,
+                 start_steps=2000,
                  buffer_length=1e6,
                  log_progress=False):
 
@@ -122,6 +124,8 @@ class DDPG_Learner:
         # LR is the learning rate of the ``AdamW`` optimizer
         
         self.BATCH_SIZE = batch_size
+        self.policy_delay = policy_delay
+        self.actor_holdback = actor_holdback
         self.GAMMA = gamma
         self.TAU = tau
         self.LR = learning_rate
@@ -179,7 +183,7 @@ class DDPG_Learner:
 
         return torch.clamp(action, float(self.env.action_space.low[0]), float(self.env.action_space.high[0]))
         
-    def optimize_model(self):
+    def optimize_model(self, do_policy_step=False):
         # if our memory is shorter than the batch size, then 
         # we can't sample from it yet, so perform no changes
         if len(self.memory) < self.BATCH_SIZE:
@@ -236,6 +240,8 @@ class DDPG_Learner:
         torch.nn.utils.clip_grad_value_(self.Q_net.parameters(), 100)
         self.Q_optimizer.step()
 
+        if not do_policy_step:
+            return
         # Now gradient ascend the policy_net parameters
         next_actions = self.policy_net(state_batch)
         Q_in = torch.cat((state_batch, next_actions), dim=-1)
@@ -289,7 +295,7 @@ class DDPG_Learner:
                 # select action based on observed state
                 action = self.select_action(state)
                 # take step in environment to get next state, reward, and termination/truncation signals
-                observation, reward, terminated, truncated, _ = self.env.step(action.item())
+                observation, reward, terminated, truncated, info = self.env.step(action.item())
                 self.steps_done += 1
                 cumulative_reward += reward
                 reward = torch.tensor([reward], device=device)
@@ -310,7 +316,8 @@ class DDPG_Learner:
                 if len(self.memory) > self.start_steps:
         
                     # Optimization step
-                    self.optimize_model()
+                    actor_ready = self.steps_done > self.start_steps + self.actor_holdback
+                    self.optimize_model(do_policy_step=actor_ready and (t % self.policy_delay == 0))
             
                     # Polyak averaging to update target nets
                     Q_net_state_dict = self.Q_net.state_dict()
@@ -330,7 +337,7 @@ class DDPG_Learner:
                 if done:
                     self.episode_durations.append(t + 1)
                     self.cumulative_rewards.append(cumulative_reward)
-                    if reward == 1000:
+                    if info["success"]:
                         self.final_state_balanced.append(1)
                     else:
                         self.final_state_balanced.append(0)
