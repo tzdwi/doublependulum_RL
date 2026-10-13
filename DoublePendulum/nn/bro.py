@@ -110,6 +110,8 @@ class BRO_Learner:
                  start_steps=2000,
                  buffer_length=1e6,
                  reset_steps = [15001,50001,250000],
+                 actor_holdback=20000,
+                 reset_holdback=2000,
                  log_progress=False):
 
         self.env = init_env(size=size,
@@ -164,7 +166,8 @@ class BRO_Learner:
         self.n_observations = len(state)
         self.scale = float(self.env.action_space.high[0])
 
-        self.target_entropy = -target_entropy*float(self.env.action_space.shape[0])
+        # logprobs here are in force units, so shift the [-1, 1]-unit target by log(scale).
+        self.target_entropy = math.log(self.scale) - target_entropy*float(self.env.action_space.shape[0])
 
         # Network params
         self.dim_block = dim_block
@@ -181,7 +184,11 @@ class BRO_Learner:
         self.steps_done = 0
         self.start_steps = max(start_steps, 2*self.BATCH_SIZE)
         self.replay_ratio = replay_ratio
+        # reset_steps count from when the actor first starts learning
         self.reset_steps = reset_steps
+        self.reset_holdback = reset_holdback
+        self.first_actor_step = self.start_steps + actor_holdback
+        self.actor_start_step = self.first_actor_step
         
         self.episode_durations = []
         self.cumulative_rewards = []
@@ -278,7 +285,7 @@ class BRO_Learner:
 
         return torch.clamp(action, float(self.env.action_space.low[0]), float(self.env.action_space.high[0]))
         
-    def optimize_model(self):
+    def optimize_model(self, do_policy_step=True):
         # if our memory is shorter than the batch size, then 
         # we can't sample from it yet, so perform no changes
         if len(self.memory) < self.BATCH_SIZE:
@@ -344,6 +351,21 @@ class BRO_Learner:
         torch.nn.utils.clip_grad_value_(self.Q_net_1.parameters(), 100)
         torch.nn.utils.clip_grad_value_(self.Q_net_2.parameters(), 100)
         self.Q_optimizer.step()
+
+        # Step 11 (run early; steps 4-10 use only the online critics): Update target networks
+        # Polyak averaging to update target nets
+        for net, target in zip([self.Q_net_1, self.Q_net_2], 
+                                [self.Q_target_1, self.Q_target_2]):
+            net_state_dict = net.state_dict()
+            target_state_dict = target.state_dict()
+            for key in net_state_dict:
+                target_state_dict[key] = target_state_dict[key]*self.POLYAK + net_state_dict[key]*(1-self.POLYAK)
+        
+            target.load_state_dict(target_state_dict)
+
+        if not do_policy_step:
+            torch.cuda.empty_cache()
+            return
 
         # Step 4: Calculate pessimistic actor value
 
@@ -432,17 +454,6 @@ class BRO_Learner:
         loss.backward()
         self.tau_optimizer.step()
 
-        # Step 11: Update target networks
-        # Polyak averaging to update target nets
-        for net, target in zip([self.Q_net_1, self.Q_net_2], 
-                                [self.Q_target_1, self.Q_target_2]):
-            net_state_dict = net.state_dict()
-            target_state_dict = target.state_dict()
-            for key in net_state_dict:
-                target_state_dict[key] = target_state_dict[key]*self.POLYAK + net_state_dict[key]*(1-self.POLYAK)
-        
-            target.load_state_dict(target_state_dict)
-
         torch.cuda.empty_cache()
 
     def run_sim(self, episode_number):
@@ -506,12 +517,15 @@ class BRO_Learner:
                 state = next_state
 
                 if len(self.memory) > self.start_steps:
-                    if (self.steps_done in self.reset_steps) or ((self.steps_done != 0) and (self.steps_done % self.reset_steps[-1] == 0)):
+                    since_actor = self.steps_done - self.first_actor_step
+                    if (since_actor in self.reset_steps) or ((since_actor > 0) and (since_actor % self.reset_steps[-1] == 0)):
                         #reset
                         self.initialize_params()
+                        self.actor_start_step = self.steps_done + self.reset_holdback
         
+                    actor_ready = self.steps_done > self.actor_start_step
                     for i in range(self.replay_ratio):
-                        self.optimize_model()
+                        self.optimize_model(do_policy_step=actor_ready)
                 
         
                 if done:
