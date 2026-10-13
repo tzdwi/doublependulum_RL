@@ -12,13 +12,13 @@ class DoublePendulumEnv(gym.Env):
     SCREEN_DIM = 720
     SUCCESS_TIME = 5 # We'll have won if we get the thing to stand up for 5 seconds
 
-    def __init__(self, render_mode=None, size=50, max_F=25.0, max_ang_vel=4*np.pi, mm=5.0, m1=0.5, l1=10.0, m2=0.5, l2=10.0, dt=0.03, theta_tol=np.pi/10):
+    def __init__(self, render_mode=None, size=50, max_F=25.0, max_ang_vel=4*np.pi, mm=5.0, m1=0.5, l1=10.0, m2=0.5, l2=10.0, dt=0.03, theta_tol=np.pi/10, action_repeat=3):
         self.size = size  # The size of the track
         self.max_F = max_F # maximum applied F in Neutons
         self.max_ang_vel = max_ang_vel # we'll allow the second pendulum to go faster though 
         self.dt = dt
-        if self.dt != 0.03:
-            self.metadata = {**self.metadata, "render_fps": int(1 / self.dt)}
+        self.action_repeat = action_repeat # physics steps each chosen force is held for
+        self.metadata = {**self.metadata, "render_fps": int(1 / (self.dt * self.action_repeat))}
         self.max_cart_vel = self.size/self.dt/2 # can we resolve the cart's motion?
         self.theta_tol = theta_tol #absolute tolerance in variance between state and "standing"
 
@@ -141,18 +141,43 @@ class DoublePendulumEnv(gym.Env):
         self._agent_location = np.clip(
             action, -self.max_F, self.max_F
         )
-        # Now apply the current force to the pendulum
-        self.pendulum.step(F=self._agent_location)
+        # Hold the force for action_repeat physics steps. Shaping penalties are averaged so the
+        # reward scale per decision is unchanged; one-off penalties and bonuses are added in full.
+        infos = []
+        for _ in range(self.action_repeat):
+            infos.append(self._physics_step())
+            if infos[-1]["success"] or infos[-1]["failure_penalty"]:
+                break
+        shaping = ["distance_penalty", "velocity_penalty", "tilt_penalty", "control_penalty"]
+        events = ["failure_penalty", "offtrack_penalty", "success_bonus"]
+        info = {key: float(np.mean([i[key] for i in infos])) for key in shaping}
+        info.update({key: float(sum(i[key] for i in infos)) for key in events})
+        info.update({key: any(i[key] for i in infos) for key in ["success", "oob", "offtrack"]})
+        terminated = info["success"] or info["failure_penalty"] > 0
+        reward = (
+            -info["distance_penalty"]
+            -info["velocity_penalty"]
+            -info["tilt_penalty"]
+            -info["control_penalty"]
+            -info["failure_penalty"]
+            -info["offtrack_penalty"]
+            +info["success_bonus"]
+        )
 
-        observation = self._get_obs()
+        if self.render_mode == "human":
+            self.render()
+
+        return self._clip_obs(self._get_obs()), reward, terminated, False, info
+
+    def _physics_step(self):
+        # Apply the current force to the pendulum for one physics step
+        self.pendulum.step(F=self._agent_location)
         self.state = self._get_state()
 
-        terminated = False
         success, offtrack, oob = self._success_offtrack_or_oob()
         if offtrack:
             # Clip the pendulum to the track and reverse its momentum.
             self.pendulum.bounce(rail_pos=self.size)
-            observation = self._get_obs()
             self.state = self._get_state()
 
         length = self.l1 + self.l2
@@ -173,10 +198,8 @@ class DoublePendulumEnv(gym.Env):
         failure_penalty = 0.0 if success or self.healthy else 10.0
         offtrack_penalty = 1.0 if offtrack else 0.0
         success_bonus = 10.0 if success else 0.0
-        if success or failure_penalty:
-            terminated = True
 
-        info = {
+        return {
             "distance_penalty": float(distance_penalty),
             "velocity_penalty": float(velocity_penalty),
             "tilt_penalty": float(tilt_penalty),
@@ -188,20 +211,6 @@ class DoublePendulumEnv(gym.Env):
             "oob": bool(oob),
             "offtrack": bool(offtrack),
         }
-        reward = (
-            -info["distance_penalty"]
-            -info["velocity_penalty"]
-            -info["tilt_penalty"]
-            -info["control_penalty"]
-            -info["failure_penalty"]
-            -info["offtrack_penalty"]
-            +info["success_bonus"]
-        )
-
-        if self.render_mode == "human":
-            self.render()
-
-        return self._clip_obs(observation), reward, terminated, False, info
     
     @property
     def healthy(self):
