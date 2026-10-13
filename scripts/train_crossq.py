@@ -9,6 +9,12 @@ print('Imported!')
 learner = crossQ.CrossQ_Learner(log_progress=True)
 print('Initialized!')
 
-learner.train(progress=True, make_plots=True, num_episodes=10000)
+try:
+	learner.load()
+	print("Successfully loaded previous weights")
+except:
+	print("Initializing with fresh weights")
+
+learner.train(progress=True, make_plots=True, num_episodes=100000)
 
 learner.dump()

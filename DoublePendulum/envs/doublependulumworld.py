@@ -38,7 +38,7 @@ class DoublePendulumEnv(gym.Env):
 
         self.pendulum = DoublePendulum(mm=mm, m1=m1, m2=m2, l1=l1, l2=l2, dt=dt)
         self._agent_location=0.0
-        self.state = self._get_obs()
+        self.state = self._get_state()
 
         # State variables...
         # xm - cart position
@@ -48,15 +48,14 @@ class DoublePendulumEnv(gym.Env):
         # dtheta1/dt
         # dtheta2/dt
         # F_applied
-        high = np.array(
+        self._state_high = np.array(
             [self.size, 5*np.pi, 5*np.pi, self.max_cart_vel, self.max_ang_vel, 10*(self.m2/self.m1)*self.max_ang_vel, self.max_F], dtype=np.float64
         )
-        # Observations are dictionaries with the pendulum's state vector and agent's current applied force
-        low = -high
-        self.observation_space = spaces.Box(low=low, high=high, dtype=np.float64)
+        self._state_low = -self._state_high
+        self.observation_space = spaces.Box(-1.0, 1.0, shape=(7,), dtype=np.float32)
 
-        # We can either add or subtract to the current force by at most 10 N on either side
-        self.action_space = spaces.Box(-10., 10., shape=(1,))
+        # action is the applied force over that timestep
+        self.action_space = spaces.Box(-max_F, max_F, shape=(1,))
 
         self.success_frames = 0
 
@@ -74,13 +73,37 @@ class DoublePendulumEnv(gym.Env):
         self.clock = None
         self.screen = None
 
-    def _get_obs(self):
+    def _get_state(self):
+        # This is the raw physical state
         return np.append(self.pendulum.x, self._agent_location)
+
+    def _get_obs(self):
+        # now lets scale our raw state into a helpful observation
+        # that is bounded in all dimensions to -1, 1
+        # cart pos scaled to rail size
+        # thetas wrapped around pi, scaled by pi
+        # cart velocity relative to the speed scale defined by the physics
+        # angular velocities relative to the max initialized vel
+        # foce relative to the max
+        state = self._get_state()
+        obs = np.array(
+            [
+                state[0] / self.size,
+                np.arctan2(np.sin(state[1] - np.pi), np.cos(state[1] - np.pi)) / np.pi,
+                np.arctan2(np.sin(state[2] - np.pi), np.cos(state[2] - np.pi)) / np.pi,
+                state[3] / self.speed_scale,
+                state[4] / self.max_ang_vel,
+                state[5] / self.max_ang_vel,
+                state[6] / self.max_F,
+            ],
+            dtype=np.float32,
+        )
+        return self._clip_obs(obs)
 
     def _clip_obs(self, observation):
         return np.clip(observation, self.observation_space.low, self.observation_space.high)
 
-    def reset(self, seed=None, options=None):
+    def reset(self, seed=42, options=None):
         # We need the following line to seed self.np_random
         super().reset(seed=seed)
 
@@ -101,7 +124,7 @@ class DoublePendulumEnv(gym.Env):
 
         # Reset the state
         observation = self._get_obs()
-        self.state = observation
+        self.state = self._get_state()
 
         # Reset success frames
         self.success_frames = 0
@@ -114,62 +137,60 @@ class DoublePendulumEnv(gym.Env):
         return self._clip_obs(observation), info
 
     def step(self, action):
-        # Action will be selected from +/- 0.5
         # Update current force, clipped to current boundaries
         self._agent_location = np.clip(
-            self._agent_location + action, -self.max_F, self.max_F
+            action, -self.max_F, self.max_F
         )
         # Now apply the current force to the pendulum
         self.pendulum.step(F=self._agent_location)
 
         observation = self._get_obs()
-        self.state = observation
+        self.state = self._get_state()
 
-        # Calculate reward, ala default gymansium double pendulum
-        reward = 0.0
         terminated = False
-        info = {"alive_bonus":0.0,"distance_penalty":0.0,"velocity_penalty":0.0,"success":False,"oob":False,"offtrack":False}
-        # step 0: did we succeed?
-        # An episode is done iff the pendulum is vertical,
-        # all velocities are < 0.1% of the relevant velocity
-        # scale (average pendulum length / dt),
-        # and we've been standing still for sufficient time
-        success, offtrack, oob = self._success_offtrack_or_oob() 
-        info["success"] = success
-        info["offtrack"] = offtrack
+        success, offtrack, oob = self._success_offtrack_or_oob()
         if offtrack:
-            reward = -2.5
-            # clip the pendulum to the track and reverse its momentum
+            # Clip the pendulum to the track and reverse its momentum.
             self.pendulum.bounce(rail_pos=self.size)
             observation = self._get_obs()
-            self.state = observation
-        info["oob"] = oob
-        if success: 
-            reward += 1000
-            terminated = True
-            if self.render_mode == "human":
-                self.render()
-            
-            return self._clip_obs(observation), reward, terminated, False, info
+            self.state = self._get_state()
 
-        # step 1: alive bonus; is the pendulum healthy?
-        if self.healthy:
-            reward += 10.0
-            info["alive_bonus"] = 10.0
-        else:
-            terminated = True
-
-        # coordinate-based penalties
+        length = self.l1 + self.l2
         cart_coord = self.pendulum.transform_cartesian(do_vels=True)
-        # step 2: distance penalty
-        distance = 0.01 * (cart_coord[2][0]/(self.l1+self.l2)) ** 2.0 + (cart_coord[2][1]/(self.l1+self.l2) - 2)**2.0
-        info["distance_penalty"] = distance
-        reward -= distance
+        tip_x = cart_coord[2][0] / length
+        tip_y = cart_coord[2][1] / length
+        distance_penalty = (1.0 - tip_y) ** 2.0 + 0.01 * tip_x ** 2.0
+        velocity_penalty = (
+            0.01 * (self.state[3] / self.speed_scale) ** 2.0
+            + 0.01 * (self.state[4] / self.max_ang_vel) ** 2.0
+            + 0.01 * (self.state[5] / self.max_ang_vel) ** 2.0
+        )
+        control_penalty = 0.001 * (self.state[6] / self.max_F) ** 2.0
+        failure_penalty = 0.0 if success or self.healthy else 1.0
+        offtrack_penalty = 1.0 if offtrack else 0.0
+        success_bonus = 10.0 if success else 0.0
+        if success or failure_penalty:
+            terminated = True
 
-        #step 3: velocity penalty
-        velocity = 1e-3*abs(observation[4]) + 5e-3*abs(observation[5])
-        info["velocity_penalty"] = velocity
-        reward -= velocity
+        info = {
+            "distance_penalty": float(distance_penalty),
+            "velocity_penalty": float(velocity_penalty),
+            "control_penalty": float(control_penalty),
+            "failure_penalty": float(failure_penalty),
+            "offtrack_penalty": float(offtrack_penalty),
+            "success_bonus": float(success_bonus),
+            "success": bool(success),
+            "oob": bool(oob),
+            "offtrack": bool(offtrack),
+        }
+        reward = (
+            -info["distance_penalty"]
+            -info["velocity_penalty"]
+            -info["control_penalty"]
+            -info["failure_penalty"]
+            -info["offtrack_penalty"]
+            +info["success_bonus"]
+        )
 
         if self.render_mode == "human":
             self.render()
@@ -181,9 +202,8 @@ class DoublePendulumEnv(gym.Env):
         # We're healthy if the second head is above the first
         # and both are above 0.5 * l1
         cart_coord = self.pendulum.transform_cartesian(do_vels=True)
-        y2 = cart_coord[2][1]
-        y1 = cart_coord[1][1]
-        return (y2 >= y1) and (y1 >= 0.5*self.l1)
+        y2 = cart_coord[2][1]/(self.l1+self.l2)/0.3 # originally, each pole was 0.6
+        return y2 >= 1
 
     def _distance(self):
         raw_dist = self.state[1:6] - self._target_loc
@@ -215,9 +235,7 @@ class DoublePendulumEnv(gym.Env):
         success = self.success_frames * self.dt >= self.SUCCESS_TIME
         pos = s[0]
         offtrack = np.abs(pos) > self.size
-        low = self.observation_space.low
-        high = self.observation_space.high
-        oob = not (np.all(s >= low) & np.all(s <= high))
+        oob = not (np.all(s >= self._state_low) & np.all(s <= self._state_high))
         return success, offtrack, oob
 
     def render(self, log_reward=False, reward=None):

@@ -14,7 +14,7 @@ import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
 
-from .nn_common import this_dir, plot_dir, vid_dir, init_env, device, Transition, ReplayMemory
+from .nn_common import this_dir, plot_dir, vid_dir, init_env, device, Transition, ReplayMemory, warmup_action
 
 import imageio
 
@@ -40,6 +40,9 @@ class SAC_POLICY_DP(nn.Module):
         self.layer1 = nn.Linear(n_observations, 128)
         self.layer2 = nn.Linear(128, 128)
         self.layer3 = nn.Linear(128, 2)
+        nn.init.zeros_(self.layer3.weight)
+        nn.init.zeros_(self.layer3.bias)
+        self.layer3.bias.data[1] = -1.0
         self.activation = nn.Softplus()
 
     # Called with either one element to determine next action, or a batch
@@ -174,7 +177,7 @@ class SAC_Learner:
         actions from the environment
         """
         if (self.steps_done < self.start_steps) and (not do_deterministic):
-            action = torch.as_tensor(self.env.action_space.sample(), device=device, dtype=torch.float32).view(1, 1)
+            action = torch.as_tensor(warmup_action(self.env.action_space), device=device, dtype=torch.float32).view(1, 1)
         else:
             with torch.no_grad():
                 action_mu, action_logsig = self.policy_net(state).chunk(2, dim=-1)
@@ -279,7 +282,7 @@ class SAC_Learner:
 
     def run_sim(self, episode_number):
         frames = []
-        state, info = self.log_env.reset()
+        state, info = self.log_env.resetseed=(episode_number)
         state = torch.tensor(state, dtype=torch.float32, device=device).unsqueeze(0)
         done = False
         while not done:
@@ -309,11 +312,11 @@ class SAC_Learner:
         
         for i_episode in iterator:
             if i_episode > 0:
-                if self.log_env and ((np.log2(i_episode) % 1 == 0) or (i_episode==num_episodes-1)):
+                if self.log_env and ((np.log2(i_episode) % 2 == 0) or (i_episode==num_episodes-1)):
                     self.run_sim(i_episode)
             cumulative_reward = 0
             # Initialize the environment and get its state
-            state, info = self.env.reset()
+            state, info = self.env.reset(seed=i_episode)
             state = torch.tensor(state, dtype=torch.float32, device=device).unsqueeze(0)
             for t in count():
                 # select action based on observed state

@@ -19,7 +19,7 @@ import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
 
-from .nn_common import this_dir, plot_dir, vid_dir, init_env, device, Transition, ReplayMemory
+from .nn_common import this_dir, plot_dir, vid_dir, init_env, device, Transition, ReplayMemory, warmup_action
 
 import imageio
 
@@ -197,6 +197,9 @@ class BRO_Learner:
         #nets and targets
         self.optimistic_net =BroNet(dim_in=self.n_observations+1, dim_out=1,dim_block=self.dim_block,dim_hid=self.dim_hid,N_block=self.N_block,tiny_outs=True).to(device)
         self.pessimistic_net = BroNet(dim_in=self.n_observations, dim_out=2,dim_block=self.dim_block,dim_hid=self.dim_hid,N_block=self.N_block).to(device)
+        nn.init.zeros_(self.pessimistic_net.dense_out.weight)
+        nn.init.zeros_(self.pessimistic_net.dense_out.bias)
+        self.pessimistic_net.dense_out.bias.data[1] = -1.0
 
         self.Q_net_1 = BroNet(dim_in=self.n_observations+1,dim_out=self.num_quantiles,dim_block=self.dim_block,dim_hid=self.dim_hid,N_block=self.N_block).to(device)
         self.Q_target_1 = BroNet(dim_in=self.n_observations+1,dim_out=self.num_quantiles,dim_block=self.dim_block,dim_hid=self.dim_hid,N_block=self.N_block).to(device)
@@ -256,7 +259,7 @@ class BRO_Learner:
         actions from the environment
         """
         if (self.steps_done < self.start_steps) and (not do_deterministic):
-            action = torch.as_tensor(self.env.action_space.sample(), device=device, dtype=torch.float32).view(1, 1)
+            action = torch.as_tensor(warmup_action(self.env.action_space), device=device, dtype=torch.float32).view(1, 1)
         else:
             with torch.no_grad():
                 action_mu, action_logsig = self.pessimistic_net(state).chunk(2, dim=-1)
@@ -444,7 +447,7 @@ class BRO_Learner:
 
     def run_sim(self, episode_number):
         frames = []
-        state, info = self.log_env.reset()
+        state, info = self.log_env.reset(seed=episode_number)
         state = torch.tensor(state, dtype=torch.float32, device=device).unsqueeze(0)
         done = False
         while not done:
@@ -474,11 +477,11 @@ class BRO_Learner:
         
         for i_episode in iterator:
             if i_episode > 0:
-                if self.log_env and ((np.log2(i_episode) % 1 == 0) or (i_episode==num_episodes-1)):
+                if self.log_env and ((np.log2(i_episode) % 2 == 0) or (i_episode==num_episodes-1)):
                     self.run_sim(i_episode)
             cumulative_reward = 0
             # Initialize the environment and get its state
-            state, info = self.env.reset()
+            state, info = self.env.reset(seed=i_episode)
             state = torch.tensor(state, dtype=torch.float32, device=device).unsqueeze(0)
             for t in count():
                 # select action based on observed state

@@ -34,6 +34,11 @@ def init_env(size=50, max_F=25.0, max_ang_vel=4*np.pi, mm=5.0, m1=0.5, l1=10.0, 
                   )
     return env
 
+def warmup_action(action_space):
+    scale = float(action_space.high[0])
+    action = np.random.normal(0.0, 0.2 * scale)
+    return float(np.clip(action, action_space.low[0], action_space.high[0]))
+
 # if GPU is to be used
 device = torch.device(
     "cuda" if torch.cuda.is_available() else

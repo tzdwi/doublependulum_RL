@@ -14,7 +14,7 @@ import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
 
-from .nn_common import this_dir, plot_dir, vid_dir, init_env, device, Transition, ReplayMemory
+from .nn_common import this_dir, plot_dir, vid_dir, init_env, device, Transition, ReplayMemory, warmup_action
 
 import imageio
 
@@ -38,6 +38,8 @@ class DDPG_POLICY_DP(nn.Module):
         self.layer1 = nn.Linear(n_observations, 128)
         self.layer2 = nn.Linear(128, 128)
         self.layer3 = nn.Linear(128, 1)
+        nn.init.zeros_(self.layer3.weight)
+        nn.init.zeros_(self.layer3.bias)
         self.activation = nn.Softplus()
         self.scale = scale
 
@@ -82,9 +84,6 @@ class DDPG_Learner:
                  theta_tol=np.pi/10,
                  batch_size=128,
                  gamma=0.99,
-                 eps_start=0.9,
-                 eps_end=0.01,
-                 eps_decay=2500,
                  tau=0.995,
                  learning_rate=3e-4,
                  start_steps=256,
@@ -119,17 +118,11 @@ class DDPG_Learner:
     
         # BATCH_SIZE is the number of transitions sampled from the replay buffer
         # GAMMA is the discount factor as mentioned in the previous section
-        # EPS_START is the starting value of epsilon
-        # EPS_END is the final value of epsilon
-        # EPS_DECAY controls the rate of exponential decay of epsilon, higher means a slower decay
         # TAU is the update rate of the target network for polyak averaging
         # LR is the learning rate of the ``AdamW`` optimizer
         
         self.BATCH_SIZE = batch_size
         self.GAMMA = gamma
-        self.EPS_START = eps_start
-        self.EPS_END = eps_end
-        self.EPS_DECAY = eps_decay
         self.TAU = tau
         self.LR = learning_rate
         
@@ -170,18 +163,19 @@ class DDPG_Learner:
         """
         We deterministically pick an action and add on decaying white noise.
 
-        We also want some exploration, so for the first `start_steps` steps, we uniformly sample
-        actions from the environment
+        We also want some exploration, so for the first `start_steps` steps, we sample
+        actions from a narrow distribution around zero force.
         """
         if (self.steps_done < self.start_steps) and (not do_deterministic):
-            action = torch.as_tensor(self.env.action_space.sample(), device=device, dtype=torch.float32).view(1, 1)
+            action = torch.as_tensor(warmup_action(self.env.action_space), device=device, dtype=torch.float32).view(1, 1)
         else:
             with torch.no_grad():
                 action = self.policy_net(state)
                 if not do_deterministic:
-                    steps_ellapsed = self.steps_done-self.start_steps
-                    eps = self.EPS_END + (self.EPS_START - self.EPS_END) * math.exp(-1. * steps_ellapsed / self.EPS_DECAY)
-                    action += eps*torch.randn_like(action)
+                    steps_elapsed = self.steps_done-self.start_steps
+                    scale = float(self.env.action_space.high[0])
+                    noise_std = scale * (0.05 + 0.25 * math.exp(-steps_elapsed / 20000))
+                    action += noise_std*torch.randn_like(action)
 
         return torch.clamp(action, float(self.env.action_space.low[0]), float(self.env.action_space.high[0]))
         
@@ -255,7 +249,7 @@ class DDPG_Learner:
 
     def run_sim(self, episode_number):
         frames = []
-        state, info = self.log_env.reset()
+        state, info = self.log_env.reset(seed=episode_number)
         state = torch.tensor(state, dtype=torch.float32, device=device).unsqueeze(0)
         done = False
         while not done:
@@ -285,11 +279,11 @@ class DDPG_Learner:
         
         for i_episode in iterator:
             if i_episode > 0:
-                if self.log_env and ((np.log2(i_episode) % 1 == 0) or (i_episode==num_episodes-1)):
+                if self.log_env and ((np.log2(i_episode) % 2 == 0) or (i_episode==num_episodes-1)):
                     self.run_sim(i_episode)
             cumulative_reward = 0
             # Initialize the environment and get its state
-            state, info = self.env.reset()
+            state, info = self.env.reset(seed=i_episode)
             state = torch.tensor(state, dtype=torch.float32, device=device).unsqueeze(0)
             for t in count():
                 # select action based on observed state

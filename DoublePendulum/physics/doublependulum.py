@@ -73,7 +73,6 @@ class DoublePendulum:
 
     def _initialize(self, seed):
         rng = np.random.default_rng(seed)
-        self.t = 0
         init_arr = np.zeros(6) # x_m, theta_1, theta_2, then time derivatives
         init_arr[1] = np.pi+0.01*rng.uniform(-1, 1) #random
         init_arr[2] = np.pi+0.01*rng.uniform(-1, 1)

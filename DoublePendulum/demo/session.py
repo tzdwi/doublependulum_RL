@@ -46,9 +46,8 @@ class Session:
 		# a small kick, scaled by the user-set slider bar
 		self.env.unwrapped._agent_location = scale*np.random.randn()
 		
-		# record an observation
-		obs = self.env.unwrapped._get_obs()
-		self.env.unwrapped.state = obs
+		# Keep the environment's internal state in physical units.
+		self.env.unwrapped.state = self.env.unwrapped._get_state()
 
 		# we're playing now!
 		self.playing = True
