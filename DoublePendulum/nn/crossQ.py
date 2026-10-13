@@ -103,11 +103,12 @@ class CrossQ_Learner:
                  theta_tol=np.pi/10,
                  batch_size=128,
                  gamma=0.99,
-                 alpha=0.2,
+                 alpha=0.01,
                  learning_rate=1e-3,
                  start_steps=2000,
                  buffer_length=1e6,
                  policy_delay=3,
+                 actor_holdback=20000,
                  log_progress=False):
 
         self.env = init_env(size=size,
@@ -138,12 +139,11 @@ class CrossQ_Learner:
 
         # BATCH_SIZE is the number of transitions sampled from the replay buffer
         # GAMMA is the discount factor 
-        # ALPHA is the regularization term for the entropy
+        # alpha is the initial value of the learned entropy temperature
         # LR is the learning rate of the ``AdamW`` optimizer
         
         self.BATCH_SIZE = batch_size
         self.GAMMA = gamma
-        self.ALPHA = alpha
         self.LR = learning_rate
         
         # Get the number of state observations
@@ -151,6 +151,11 @@ class CrossQ_Learner:
         self.state = state
         n_observations = len(state)
         self.scale = float(self.env.action_space.high[0])
+
+        self.log_alpha = torch.tensor(math.log(alpha), device=device, requires_grad=True)
+        self.alpha_optimizer = optim.Adam([self.log_alpha], lr=self.LR)
+        # -dim(A) in [-1, 1] action units; logprobs here are in force units, hence the log(scale) shift.
+        self.target_entropy = math.log(self.scale) - 1.0
 
         # Net to predict the next action
         self.policy_net = CQ_POLICY_DP(n_observations).to(device)
@@ -175,6 +180,7 @@ class CrossQ_Learner:
         self.steps_done = 0
         self.start_steps = max(start_steps, 2*self.BATCH_SIZE)
         self.policy_delay = policy_delay
+        self.actor_holdback = actor_holdback
         
         self.episode_durations = []
         self.cumulative_rewards = []
@@ -263,7 +269,7 @@ class CrossQ_Learner:
         if non_final_mask.any():
             Q_nexts = torch.cat((Q1_next,Q2_next),dim=-1)
             selected = torch.min(Q_nexts, dim=-1).values
-            next_state_values[non_final_mask] = self.GAMMA*(selected[non_final_mask]-self.ALPHA*logprobs_batch)
+            next_state_values[non_final_mask] = self.GAMMA*(selected[non_final_mask]-self.log_alpha.exp().detach()*logprobs_batch)
         
         targets = reward_batch+next_state_values
     
@@ -292,12 +298,17 @@ class CrossQ_Learner:
             Qs = torch.cat([Q_net(Q_in) for Q_net in [self.Q_net_1, self.Q_net_2]], dim=-1)
             selected = torch.min(Qs, dim=-1).values
             # we want gradient _ascent_ so we use the negative of the sum of action values
-            loss = -(selected-self.ALPHA*logprobs).sum()/self.BATCH_SIZE
+            loss = -(selected-self.log_alpha.exp().detach()*logprobs).sum()/self.BATCH_SIZE
             self.policy_optimizer.zero_grad()
             loss.backward()
             # In-place gradient clipping
             torch.nn.utils.clip_grad_value_(self.policy_net.parameters(), 100)
             self.policy_optimizer.step()
+
+            alpha_loss = -(self.log_alpha * (logprobs.detach() + self.target_entropy)).mean()
+            self.alpha_optimizer.zero_grad()
+            alpha_loss.backward()
+            self.alpha_optimizer.step()
         torch.cuda.empty_cache()
 
     def run_sim(self, episode_number):
@@ -363,10 +374,8 @@ class CrossQ_Learner:
                 if len(self.memory) > self.start_steps:
         
                     # Optimization step
-                    do_policy_step = False
-                    if t % self.policy_delay == 0:
-                        do_policy_step = True
-                    self.optimize_model(do_policy_step=do_policy_step)
+                    actor_ready = self.steps_done > self.start_steps + self.actor_holdback
+                    self.optimize_model(do_policy_step=actor_ready and (t % self.policy_delay == 0))
         
                 if done:
                     self.episode_durations.append(t + 1)

@@ -102,7 +102,7 @@ class BRO_Learner:
                  std_mult=0.75,
                  learning_rate=3.0e-4,
                  gamma=0.99,
-                 alpha_init=1.0,
+                 alpha_init=0.01,
                  tau_init=0.25,
                  target_entropy=0.5,
                  KL_target=0.05,
