@@ -151,8 +151,8 @@ class DDPG_Learner:
                                        lr=self.LR, amsgrad=True)
         self.policy_optimizer = optim.AdamW(self.policy_net.parameters(), 
                                             lr=self.LR, amsgrad=True)
-        # Huber loss
-        self.criterion = nn.SmoothL1Loss()
+        # Mean squared error loss
+        self.criterion = nn.MSELoss()
         self.memory = ReplayMemory(int(buffer_length))
     
         self.steps_done = 0
@@ -212,7 +212,7 @@ class DDPG_Learner:
         # state_batch is shape N_batch x n_observations
         # action_batch is shape N_batch x 1
         # concatenate along final axis
-        Q_in = torch.cat((state_batch, action_batch), dim=-1)
+        Q_in = torch.cat((state_batch, action_batch / self.policy_net.scale), dim=-1)
         state_action_values = self.Q_net(Q_in)
     
         # Compute targets y(r, s', d) = r + gamma*(1-d)Q_targ(s', pi(s'))
@@ -225,12 +225,12 @@ class DDPG_Learner:
                 # non_final_next_states is shape N_batch_nonfinal x n_observations
                 # next action values is shape N_batch_nonfinal x 1
                 # concatenate along final axis
-                target_input = torch.cat((non_final_next_states, next_action_values), dim=-1)
+                target_input = torch.cat((non_final_next_states, next_action_values / self.policy_net.scale), dim=-1)
                 next_state_values[non_final_mask] = self.GAMMA*self.Q_target(target_input).squeeze(-1)
 
         targets = reward_batch+next_state_values
     
-        # Compute Huber loss
+        # Compute MSE loss
         loss = self.criterion(state_action_values, targets.unsqueeze(1))
     
         # Gradient descend the Q_net parameters
@@ -244,7 +244,7 @@ class DDPG_Learner:
             return
         # Now gradient ascend the policy_net parameters
         next_actions = self.policy_net(state_batch)
-        Q_in = torch.cat((state_batch, next_actions), dim=-1)
+        Q_in = torch.cat((state_batch, next_actions / self.policy_net.scale), dim=-1)
         # we want gradient _ascent_ so we use the negative of the sum of action values
         loss = -self.Q_net(Q_in).sum()/self.BATCH_SIZE
         self.policy_optimizer.zero_grad()

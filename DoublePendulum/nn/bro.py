@@ -331,7 +331,7 @@ class BRO_Learner:
                 # non_final_next_states is shape N_batch_nonfinal x n_observations
                 # next action values is shape N_batch_nonfinal x 1
                 # concatenate along final axis
-                target_input = torch.cat((non_final_next_states, next_action_values), dim=-1)
+                target_input = torch.cat((non_final_next_states, next_action_values / self.scale), dim=-1)
                 # each Q net returns Bxnum_quantiles, so we want to average along the last dim
                 Qs = self.calc_Qs(target_input, target=True)
                 Qs = 0.5*(Qs[0] + Qs[1])
@@ -340,7 +340,7 @@ class BRO_Learner:
         # Step 3: Update critic using pessimistic actor
 
         targets = reward_batch.unsqueeze(-1)+next_state_values
-        Q_in = torch.cat((state_batch, action_batch), dim=-1)
+        Q_in = torch.cat((state_batch, action_batch / self.scale), dim=-1)
         preds_1, preds_2 = self.calc_Qs(Q_in) #Bxnum_quantiles
         # Compute Huber loss around quantiles
         loss = self.quantile_regression_loss(preds_1, targets) + self.quantile_regression_loss(preds_2, targets)
@@ -376,7 +376,7 @@ class BRO_Learner:
         pes_action_values = self.scale*F.tanh(u)
         # again, logprob defined in appC here: https://arxiv.org/pdf/1801.01290
         logprobs_pes = (dists.log_prob(u) - torch.log(1.0-torch.pow(F.tanh(u),2.0)+1e-12)-math.log(self.scale)).squeeze(-1)
-        Q_in_pes = torch.cat((state_batch, pes_action_values), dim=-1)
+        Q_in_pes = torch.cat((state_batch, pes_action_values / self.scale), dim=-1)
         # each Q net returns Bxnum_quantiles, so we want to average along last dim, then sum over last (remaining) dim
         Qs_pes = self.calc_Qs(Q_in_pes)
         Qs_pes = 0.5*(Qs_pes[0]+Qs_pes[1]) #Bxn_quantiles
@@ -405,7 +405,7 @@ class BRO_Learner:
         opt_action_values = self.scale*F.tanh(u)
         # again, logprob defined in appC here: https://arxiv.org/pdf/1801.01290
         logprobs_opt = (dists.log_prob(u) - torch.log(1.0-torch.pow(F.tanh(u),2.0)+1e-12)-math.log(self.scale)).squeeze(-1)
-        Q_in_opt = torch.cat((state_batch, opt_action_values), dim=-1)
+        Q_in_opt = torch.cat((state_batch, opt_action_values / self.scale), dim=-1)
         # each Q net returns Bxnum_quantiles, so we want to average along last dim, then sum over last (remaining) dim
         Qs_opt = self.calc_Qs(Q_in_opt)
         # average over Q nets, plus optimism times half absolute difference

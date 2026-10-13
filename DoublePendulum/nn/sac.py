@@ -165,8 +165,8 @@ class SAC_Learner:
                                        lr=self.LR, amsgrad=True)
         self.policy_optimizer = optim.AdamW(self.policy_net.parameters(), 
                                             lr=self.LR, amsgrad=True)
-        # Huber loss
-        self.criterion = nn.SmoothL1Loss()
+        # Mean squared error loss
+        self.criterion = nn.MSELoss()
         self.memory = ReplayMemory(int(buffer_length))
     
         self.steps_done = 0
@@ -228,7 +228,7 @@ class SAC_Learner:
         # state_batch is shape N_batch x n_observations
         # action_batch is shape N_batch x 1
         # concatenate along final axis
-        Q_in = torch.cat((state_batch, action_batch), dim=-1)
+        Q_in = torch.cat((state_batch, action_batch / self.scale), dim=-1)
         state_action_values_1 = self.Q_net_1(Q_in)
         state_action_values_2 = self.Q_net_2(Q_in)
     
@@ -248,7 +248,7 @@ class SAC_Learner:
                 # non_final_next_states is shape N_batch_nonfinal x n_observations
                 # next action values is shape N_batch_nonfinal x 1
                 # concatenate along final axis
-                target_input = torch.cat((non_final_next_states, next_action_values), dim=-1)
+                target_input = torch.cat((non_final_next_states, next_action_values / self.scale), dim=-1)
                 # each Q net returns Bx1, so we want to stack along the last dim
                 Qs = torch.cat([Q_target(target_input) for Q_target in [self.Q_target_1, self.Q_target_2]], dim=-1)
                 selected = torch.min(Qs, dim=-1).values
@@ -257,7 +257,7 @@ class SAC_Learner:
 
         targets = reward_batch+next_state_values
     
-        # Compute Huber loss
+        # Compute MSE loss
         loss = self.criterion(state_action_values_1.squeeze(-1), targets) + self.criterion(state_action_values_2.squeeze(-1), targets)
     
         # Gradient descend the Q_net parameters
@@ -278,7 +278,7 @@ class SAC_Learner:
         next_action_values = self.scale*F.tanh(u)
         # again, logprob defined in appC here: https://arxiv.org/pdf/1801.01290
         logprobs = (dists.log_prob(u) - torch.log(1.0-torch.pow(F.tanh(u),2.0)+1e-12)-math.log(self.scale)).squeeze(-1)
-        Q_in = torch.cat((state_batch, next_action_values), dim=-1)
+        Q_in = torch.cat((state_batch, next_action_values / self.scale), dim=-1)
         # each Q net returns Bx1, so we want to stack along the last dim
         Qs = torch.cat([Q_net(Q_in) for Q_net in [self.Q_net_1, self.Q_net_2]], dim=-1)
         selected = torch.min(Qs, dim=-1).values
