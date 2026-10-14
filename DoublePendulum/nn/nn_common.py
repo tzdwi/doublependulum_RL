@@ -40,6 +40,45 @@ def warmup_action(action_space):
     action = np.random.normal(0.0, 0.2 * scale)
     return float(np.clip(action, action_space.low[0], action_space.high[0]))
 
+class EarlyStop:
+    """Stop training once the task is solved, or once episode length stops improving."""
+
+    def __init__(self, window=100, solved_count=95, patience=2000, min_gain=5):
+        self.window = window
+        self.solved_count = solved_count
+        self.patience = patience
+        self.min_gain = min_gain
+        self.best = None
+        self.since = 0
+        self.hold = 0
+
+    def reset(self):
+        # Ignore the windows that still contain pre-reset episodes.
+        self.best = None
+        self.since = 0
+        self.hold = self.window
+
+    def check(self, durations, successes, actor_started):
+        if len(durations) < self.window or not actor_started:
+            return None
+        if self.hold:
+            self.hold -= 1
+            return None
+        recent = durations[-self.window:]
+        recent_len = float(np.mean(recent))
+        recent_succ = int(sum(successes[-self.window:]))
+        if recent_succ >= self.solved_count:
+            return f"solved: {recent_succ}/{self.window} of the last episodes succeeded"
+        if self.best is None or recent_len > self.best + self.min_gain:
+            self.best = recent_len
+            self.since = 0
+        else:
+            self.since += 1
+            if self.since >= self.patience:
+                return (f"stalled: mean length {recent_len:.0f} has not beaten {self.best:.0f} "
+                        f"by {self.min_gain} for {self.patience} episodes")
+        return None
+
 # if GPU is to be used
 device = torch.device(
     "cuda" if torch.cuda.is_available() else

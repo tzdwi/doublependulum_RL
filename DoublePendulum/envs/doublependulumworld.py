@@ -103,9 +103,9 @@ class DoublePendulumEnv(gym.Env):
     def _clip_obs(self, observation):
         return np.clip(observation, self.observation_space.low, self.observation_space.high)
 
-    def reset(self, seed=42, options=None):
+    def reset(self, seed=None, options=None):
         # We need the following line to seed self.np_random
-        super().reset(seed=seed)
+        super().reset()
 
         # Reset the pendulum
         self.pendulum._initialize(seed=seed)

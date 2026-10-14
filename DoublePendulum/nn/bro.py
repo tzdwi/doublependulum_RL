@@ -19,7 +19,7 @@ import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
 
-from .nn_common import this_dir, plot_dir, vid_dir, init_env, device, Transition, ReplayMemory, warmup_action
+from .nn_common import this_dir, plot_dir, vid_dir, init_env, device, Transition, ReplayMemory, warmup_action, EarlyStop
 
 import imageio
 
@@ -485,7 +485,9 @@ class BRO_Learner:
         iterator = range(num_episodes)
         if progress:
             iterator = tqdm(iterator)
-        
+
+        early = EarlyStop()
+        stop = None
         for i_episode in iterator:
             if i_episode > 0:
                 if self.log_env and ((np.log2(i_episode) % 2 == 0) or (i_episode==num_episodes-1)):
@@ -522,6 +524,7 @@ class BRO_Learner:
                         #reset
                         self.initialize_params()
                         self.actor_start_step = self.steps_done + self.reset_holdback
+                        early.reset()
         
                     actor_ready = self.steps_done > self.actor_start_step
                     for i in range(self.replay_ratio):
@@ -539,27 +542,31 @@ class BRO_Learner:
                         self.final_state_truncated.append(1)
                     else:
                         self.final_state_truncated.append(0)
+                    stop = early.check(
+                        self.episode_durations, self.final_state_balanced,
+                        self.steps_done > self.actor_start_step)
                     break
-            
-                
+            if stop:
+                print(stop)
+                break
         if make_plots:
             fig = plt.figure(dpi=300)
-            plt.plot(np.arange(num_episodes), self.episode_durations)
+            plt.plot(np.arange(len(self.episode_durations)), self.episode_durations)
             plt.xlabel('Episode')
             plt.ylabel('Episode Duration')
             plt.savefig(BRO_EPISODE_DURATION_FIG, bbox_inches='tight')
             plt.clf()
-            plt.plot(np.arange(num_episodes), self.cumulative_rewards)
+            plt.plot(np.arange(len(self.episode_durations)), self.cumulative_rewards)
             plt.xlabel('Episode')
             plt.ylabel('Cumulative Rewards')
             plt.savefig(BRO_CUM_REWARDS_FIG, bbox_inches='tight')
             plt.clf()
-            plt.plot(np.arange(num_episodes), self.final_state_truncated)
+            plt.plot(np.arange(len(self.episode_durations)), self.final_state_truncated)
             plt.xlabel('Episode')
             plt.ylabel('Episode Truncated')
             plt.savefig(BRO_TRUNCATED_FIG, bbox_inches='tight')
             plt.clf()
-            plt.plot(np.arange(num_episodes), self.final_state_balanced)
+            plt.plot(np.arange(len(self.episode_durations)), self.final_state_balanced)
             plt.xlabel('Episode')
             plt.ylabel('Episode Success')
             plt.savefig(BRO_BALANCED_FIG, bbox_inches='tight')
