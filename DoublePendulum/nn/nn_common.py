@@ -51,14 +51,17 @@ class EarlyStop:
         self.best = None
         self.since = 0
         self.hold = 0
+        self.improved = False
 
     def reset(self):
         # Ignore the windows that still contain pre-reset episodes.
         self.best = None
         self.since = 0
         self.hold = self.window
+        self.improved = False
 
     def check(self, durations, successes, actor_started):
+        self.improved = False
         if len(durations) < self.window or not actor_started:
             return None
         if self.hold:
@@ -72,6 +75,7 @@ class EarlyStop:
         if self.best is None or recent_len > self.best + self.min_gain:
             self.best = recent_len
             self.since = 0
+            self.improved = True
         else:
             self.since += 1
             if self.since >= self.patience:

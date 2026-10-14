@@ -2,6 +2,7 @@
 We're going to be training a Soft Actor-Critic extension called CrossQ, see https://arxiv.org/pdf/1902.05605
 """
 import math
+import os
 import random
 import numpy as np
 import matplotlib
@@ -21,6 +22,9 @@ import imageio
 CQ_policy_pickle = this_dir+"/pickles/crossq_policy_net.pt"
 CQ_Q1_pickle = this_dir+"/pickles/crossq_q1_net.pt"
 CQ_Q2_pickle = this_dir+"/pickles/crossq_q2_net.pt"
+CQ_policy_best_pickle = this_dir+"/pickles/crossq_policy_net_best.pt"
+CQ_Q1_best_pickle = this_dir+"/pickles/crossq_q1_net_best.pt"
+CQ_Q2_best_pickle = this_dir+"/pickles/crossq_q2_net_best.pt"
 
 CQ_EPISODE_DURATION_FIG = plot_dir+"/crossq_episode_duration.png"
 CQ_CUM_REWARDS_FIG = plot_dir+"/crossq_cum_rewards.png"
@@ -393,6 +397,8 @@ class CrossQ_Learner:
                     stop = early.check(
                         self.episode_durations, self.final_state_balanced,
                         self.steps_done > self.start_steps + self.actor_holdback)
+                    if early.improved or (stop or "").startswith("solved"):
+                        self.dump_best(len(self.episode_durations), early.best)
                     break
             if stop:
                 print(stop)
@@ -420,11 +426,23 @@ class CrossQ_Learner:
             plt.savefig(CQ_BALANCED_FIG, bbox_inches='tight')
 
     def dump(self):
+        os.makedirs(os.path.dirname(CQ_policy_pickle), exist_ok=True)
         torch.save(self.policy_net.state_dict(), CQ_policy_pickle)
         torch.save(self.Q_net_1.state_dict(), CQ_Q1_pickle)
         torch.save(self.Q_net_2.state_dict(), CQ_Q2_pickle)
 
-    def load(self):
-        self.policy_net.load_state_dict(torch.load(CQ_policy_pickle, weights_only=True, map_location=device))
-        self.Q_net_1.load_state_dict(torch.load(CQ_Q1_pickle, weights_only=True, map_location=device))
-        self.Q_net_2.load_state_dict(torch.load(CQ_Q2_pickle, weights_only=True, map_location=device))
+    def dump_best(self, episode, mean_length):
+        os.makedirs(os.path.dirname(CQ_policy_best_pickle), exist_ok=True)
+        torch.save(self.policy_net.state_dict(), CQ_policy_best_pickle)
+        torch.save(self.Q_net_1.state_dict(), CQ_Q1_best_pickle)
+        torch.save(self.Q_net_2.state_dict(), CQ_Q2_best_pickle)
+        length = "n/a" if mean_length is None else f"{mean_length:.0f}"
+        print(f"saved best policy at episode {episode}, mean length {length}")
+
+    def load(self, best=True):
+        policy_path = CQ_policy_best_pickle if best else CQ_policy_pickle
+        q1_path = CQ_Q1_best_pickle if best else CQ_Q1_pickle
+        q2_path = CQ_Q2_best_pickle if best else CQ_Q2_pickle
+        self.policy_net.load_state_dict(torch.load(policy_path, weights_only=True, map_location=device))
+        self.Q_net_1.load_state_dict(torch.load(q1_path, weights_only=True, map_location=device))
+        self.Q_net_2.load_state_dict(torch.load(q2_path, weights_only=True, map_location=device))

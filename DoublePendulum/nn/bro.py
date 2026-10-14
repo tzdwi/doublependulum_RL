@@ -7,6 +7,7 @@ More info in:
 https://arxiv.org/pdf/1806.06923
 """
 import math
+import os
 import random
 import numpy as np
 import matplotlib
@@ -27,6 +28,10 @@ BRO_optimistic_pickle = this_dir+"/pickles/bro_optimistic_net.pt"
 BRO_pessimistic_pickle = this_dir+"/pickles/bro_pessimistic_net.pt"
 BRO_Q1_pickle = this_dir+"/pickles/bro_q1_net.pt"
 BRO_Q2_pickle = this_dir+"/pickles/bro_q2_net.pt"
+BRO_optimistic_best_pickle = this_dir+"/pickles/bro_optimistic_net_best.pt"
+BRO_pessimistic_best_pickle = this_dir+"/pickles/bro_pessimistic_net_best.pt"
+BRO_Q1_best_pickle = this_dir+"/pickles/bro_q1_net_best.pt"
+BRO_Q2_best_pickle = this_dir+"/pickles/bro_q2_net_best.pt"
 
 BRO_EPISODE_DURATION_FIG = plot_dir+"/bro_episode_duration.png"
 BRO_CUM_REWARDS_FIG = plot_dir+"/bro_cum_rewards.png"
@@ -545,6 +550,8 @@ class BRO_Learner:
                     stop = early.check(
                         self.episode_durations, self.final_state_balanced,
                         self.steps_done > self.actor_start_step)
+                    if early.improved or (stop or "").startswith("solved"):
+                        self.dump_best(len(self.episode_durations), early.best)
                     break
             if stop:
                 print(stop)
@@ -572,15 +579,29 @@ class BRO_Learner:
             plt.savefig(BRO_BALANCED_FIG, bbox_inches='tight')
 
     def dump(self):
+        os.makedirs(os.path.dirname(BRO_optimistic_pickle), exist_ok=True)
         torch.save(self.optimistic_net.state_dict(), BRO_optimistic_pickle)
         torch.save(self.pessimistic_net.state_dict(), BRO_pessimistic_pickle)
         torch.save(self.Q_net_1.state_dict(), BRO_Q1_pickle)
         torch.save(self.Q_net_2.state_dict(), BRO_Q2_pickle)
 
-    def load(self):
-        self.optimistic_net.load_state_dict(torch.load(BRO_optimistic_pickle, weights_only=True, map_location=device))
-        self.pessimistic_net.load_state_dict(torch.load(BRO_pessimistic_pickle, weights_only=True, map_location=device))
-        self.Q_net_1.load_state_dict(torch.load(BRO_Q1_pickle, weights_only=True, map_location=device))
-        self.Q_net_2.load_state_dict(torch.load(BRO_Q2_pickle, weights_only=True, map_location=device))
+    def dump_best(self, episode, mean_length):
+        os.makedirs(os.path.dirname(BRO_optimistic_best_pickle), exist_ok=True)
+        torch.save(self.optimistic_net.state_dict(), BRO_optimistic_best_pickle)
+        torch.save(self.pessimistic_net.state_dict(), BRO_pessimistic_best_pickle)
+        torch.save(self.Q_net_1.state_dict(), BRO_Q1_best_pickle)
+        torch.save(self.Q_net_2.state_dict(), BRO_Q2_best_pickle)
+        length = "n/a" if mean_length is None else f"{mean_length:.0f}"
+        print(f"saved best policy at episode {episode}, mean length {length}")
+
+    def load(self, best=True):
+        optimistic_path = BRO_optimistic_best_pickle if best else BRO_optimistic_pickle
+        pessimistic_path = BRO_pessimistic_best_pickle if best else BRO_pessimistic_pickle
+        q1_path = BRO_Q1_best_pickle if best else BRO_Q1_pickle
+        q2_path = BRO_Q2_best_pickle if best else BRO_Q2_pickle
+        self.optimistic_net.load_state_dict(torch.load(optimistic_path, weights_only=True, map_location=device))
+        self.pessimistic_net.load_state_dict(torch.load(pessimistic_path, weights_only=True, map_location=device))
+        self.Q_net_1.load_state_dict(torch.load(q1_path, weights_only=True, map_location=device))
+        self.Q_net_2.load_state_dict(torch.load(q2_path, weights_only=True, map_location=device))
         self.Q_target_1.load_state_dict(self.Q_net_1.state_dict())
         self.Q_target_2.load_state_dict(self.Q_net_2.state_dict())

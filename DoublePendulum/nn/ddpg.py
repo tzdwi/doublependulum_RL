@@ -2,6 +2,7 @@
 We're going to be training a Deep Deterministic Policy Gradient to learn how to control the double pendulum
 """
 import math
+import os
 import random
 import numpy as np
 import matplotlib
@@ -20,6 +21,8 @@ import imageio
 
 DDPG_policy_pickle = this_dir+"/pickles/ddpg_policy_net.pt"
 DDPG_Q_pickle = this_dir+"/pickles/ddpg_q_net.pt"
+DDPG_policy_best_pickle = this_dir+"/pickles/ddpg_policy_net_best.pt"
+DDPG_Q_best_pickle = this_dir+"/pickles/ddpg_q_net_best.pt"
 
 DDPG_EPISODE_DURATION_FIG = plot_dir+"/ddpg_episode_duration.png"
 DDPG_CUM_REWARDS_FIG = plot_dir+"/ddpg_cum_rewards.png"
@@ -350,6 +353,8 @@ class DDPG_Learner:
                     stop = early.check(
                         self.episode_durations, self.final_state_balanced,
                         self.steps_done > self.start_steps + self.actor_holdback)
+                    if early.improved or (stop or "").startswith("solved"):
+                        self.dump_best(len(self.episode_durations), early.best)
                     break
             if stop:
                 print(stop)
@@ -377,12 +382,22 @@ class DDPG_Learner:
             plt.savefig(DDPG_BALANCED_FIG, bbox_inches='tight')
 
     def dump(self):
+        os.makedirs(os.path.dirname(DDPG_policy_pickle), exist_ok=True)
         torch.save(self.policy_target.state_dict(), DDPG_policy_pickle)
         torch.save(self.Q_target.state_dict(), DDPG_Q_pickle)
 
-    def load(self):
-        self.policy_target.load_state_dict(torch.load(DDPG_policy_pickle, weights_only=True, map_location=device))
-        self.Q_target.load_state_dict(torch.load(DDPG_Q_pickle, weights_only=True, map_location=device))
+    def dump_best(self, episode, mean_length):
+        os.makedirs(os.path.dirname(DDPG_policy_best_pickle), exist_ok=True)
+        torch.save(self.policy_target.state_dict(), DDPG_policy_best_pickle)
+        torch.save(self.Q_target.state_dict(), DDPG_Q_best_pickle)
+        length = "n/a" if mean_length is None else f"{mean_length:.0f}"
+        print(f"saved best policy at episode {episode}, mean length {length}")
+
+    def load(self, best=True):
+        policy_path = DDPG_policy_best_pickle if best else DDPG_policy_pickle
+        q_path = DDPG_Q_best_pickle if best else DDPG_Q_pickle
+        self.policy_target.load_state_dict(torch.load(policy_path, weights_only=True, map_location=device))
+        self.Q_target.load_state_dict(torch.load(q_path, weights_only=True, map_location=device))
 
         self.policy_net.load_state_dict(self.policy_target.state_dict())
         self.Q_net.load_state_dict(self.Q_target.state_dict())
