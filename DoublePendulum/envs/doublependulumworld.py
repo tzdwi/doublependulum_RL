@@ -141,28 +141,21 @@ class DoublePendulumEnv(gym.Env):
         self._agent_location = np.clip(
             action, -self.max_F, self.max_F
         )
-        # Hold the force for action_repeat physics steps. Shaping penalties are averaged so the
-        # reward scale per decision is unchanged; one-off penalties and bonuses are added in full.
+        # Hold the force for action_repeat physics steps. The balance score is averaged so each
+        # decision is about 1 while upright. A fall ends the episode; the five-second success
+        # flag is recorded and does not end it.
         infos = []
         for _ in range(self.action_repeat):
             infos.append(self._physics_step())
-            if infos[-1]["success"] or infos[-1]["failure_penalty"]:
+            if infos[-1]["failure_penalty"]:
                 break
-        shaping = ["distance_penalty", "velocity_penalty", "tilt_penalty", "control_penalty"]
-        events = ["failure_penalty", "offtrack_penalty", "success_bonus"]
+        shaping = ["control_penalty", "balance_reward"]
+        events = ["failure_penalty", "offtrack_penalty"]
         info = {key: float(np.mean([i[key] for i in infos])) for key in shaping}
         info.update({key: float(sum(i[key] for i in infos)) for key in events})
         info.update({key: any(i[key] for i in infos) for key in ["success", "oob", "offtrack"]})
-        terminated = info["success"] or info["failure_penalty"] > 0
-        reward = (
-            -info["distance_penalty"]
-            -info["velocity_penalty"]
-            -info["tilt_penalty"]
-            -info["control_penalty"]
-            -info["failure_penalty"]
-            -info["offtrack_penalty"]
-            +info["success_bonus"]
-        )
+        terminated = info["failure_penalty"] > 0
+        reward = info["balance_reward"] - info["control_penalty"] - info["offtrack_penalty"]
 
         if self.render_mode == "human":
             self.render()
@@ -180,33 +173,20 @@ class DoublePendulumEnv(gym.Env):
             self.pendulum.bounce(rail_pos=self.size)
             self.state = self._get_state()
 
-        length = self.l1 + self.l2
-        cart_coord = self.pendulum.transform_cartesian(do_vels=True)
-        tip_x = cart_coord[2][0] / length
-        tip_y = cart_coord[2][1] / length
-        distance_penalty = (1.0 - tip_y) ** 2.0 + 0.01 * tip_x ** 2.0
-        velocity_penalty = (
-            0.01 * (self.state[3] / self.speed_scale) ** 2.0
-            + 0.01 * (self.state[4] / self.max_ang_vel) ** 2.0
-            + 0.01 * (self.state[5] / self.max_ang_vel) ** 2.0
-        )
         theta1_err = np.arctan2(np.sin(self.state[1] - np.pi), np.cos(self.state[1] - np.pi))
         theta2_err = np.arctan2(np.sin(self.state[2] - np.pi), np.cos(self.state[2] - np.pi))
-        tilt_penalty = 0.1 * min(1.0, (theta1_err**2 + theta2_err**2) / (2 * self.theta_tol**2))
-        control_penalty = 0.001 * (self.state[6] / self.max_F) ** 2.0
-        # Must be at least the capped tilt penalty / (1 - gamma), so falling is never the cheaper option.
-        failure_penalty = 0.0 if success or self.healthy else 10.0
+        # Full force costs 1e-5, below the upright change from one decision on this plant.
+        control_penalty = 1e-5 * (self.state[6] / self.max_F) ** 2.0
+        balance_reward = 0.5 * (max(0.0, np.cos(theta1_err)) + max(0.0, np.cos(theta2_err)))
+        # Marks a fall for termination. The return itself is the balance score that stops arriving.
+        failure_penalty = 0.0 if self.healthy else 1.0
         offtrack_penalty = 1.0 if offtrack else 0.0
-        success_bonus = 10.0 if success else 0.0
 
         return {
-            "distance_penalty": float(distance_penalty),
-            "velocity_penalty": float(velocity_penalty),
-            "tilt_penalty": float(tilt_penalty),
             "control_penalty": float(control_penalty),
+            "balance_reward": float(balance_reward),
             "failure_penalty": float(failure_penalty),
             "offtrack_penalty": float(offtrack_penalty),
-            "success_bonus": float(success_bonus),
             "success": bool(success),
             "oob": bool(oob),
             "offtrack": bool(offtrack),

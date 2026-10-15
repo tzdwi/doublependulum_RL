@@ -43,7 +43,7 @@ def warmup_action(action_space):
 class EarlyStop:
     """Stop training once the task is solved, or once episode length stops improving."""
 
-    def __init__(self, window=100, solved_count=95, patience=2000, min_gain=5):
+    def __init__(self, window=100, solved_count=95, patience=15000, min_gain=2):
         self.window = window
         self.solved_count = solved_count
         self.patience = patience
@@ -54,8 +54,8 @@ class EarlyStop:
         self.improved = False
 
     def reset(self):
-        # Ignore the windows that still contain pre-reset episodes.
-        self.best = None
+        # Keep the all-time best so a post-reset dip cannot replace its checkpoint.
+        # Restart the stall timer, and ignore windows that still contain pre-reset episodes.
         self.since = 0
         self.hold = self.window
         self.improved = False

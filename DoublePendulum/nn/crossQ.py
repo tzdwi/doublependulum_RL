@@ -289,6 +289,9 @@ class CrossQ_Learner:
         self.Q_optimizer.step()
 
         if do_policy_step:
+            # switch batch norms to learned values
+            self.Q_net_1.eval()
+            self.Q_net_2.eval()
             # Now gradient ascend the policy_net parameters
             next_action_mus, next_action_logsigmas = self.policy_net(state_batch).chunk(2, dim=-1)
             next_action_logsigmas = next_action_logsigmas.clamp(-20, 2)
@@ -301,6 +304,17 @@ class CrossQ_Learner:
             # each Q net returns Bx1, so we want to stack along the last dim
             Qs = torch.cat([Q_net(Q_in) for Q_net in [self.Q_net_1, self.Q_net_2]], dim=-1)
             selected = torch.min(Qs, dim=-1).values
+            if getattr(self, "actor_probe", None) is not None:
+                action_grad = torch.autograd.grad(selected.sum(), next_action_values, retain_graph=True)[0]
+                forces = next_action_values.detach()
+                slope = action_grad.detach()
+                self.actor_probe.append((
+                    float(forces.std()),
+                    float(forces.mean()),
+                    float(selected.detach().std()),
+                    float(slope.abs().mean()),
+                    float((slope * forces.sign()).mean()),
+                ))
             # we want gradient _ascent_ so we use the negative of the sum of action values
             loss = -(selected-self.log_alpha.exp().detach()*logprobs).sum()/self.BATCH_SIZE
             self.policy_optimizer.zero_grad()
@@ -313,6 +327,9 @@ class CrossQ_Learner:
             self.alpha_optimizer.zero_grad()
             alpha_loss.backward()
             self.alpha_optimizer.step()
+            # switch batch norms back to training
+            self.Q_net_1.train()
+            self.Q_net_2.train()
         torch.cuda.empty_cache()
 
     def run_sim(self, episode_number):
