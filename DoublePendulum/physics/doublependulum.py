@@ -1,6 +1,57 @@
 import numpy as np
-import scipy
-import scipy.integrate as itg
+from numba import njit
+
+
+@njit(cache=True)
+def _solve_symmetric_3x3(a, b, c, d, e, f, r0, r1, r2):
+    """Solve [[a,b,c], [b,d,e], [c,e,f]] * x = rhs."""
+    c00 = d * f - e * e
+    c01 = c * e - b * f
+    c02 = b * e - c * d
+    c11 = a * f - c * c
+    c12 = b * c - a * e
+    c22 = a * d - b * b
+    determinant = a * c00 + b * c01 + c * c02
+    return (
+        (c00 * r0 + c01 * r1 + c02 * r2) / determinant,
+        (c01 * r0 + c11 * r1 + c12 * r2) / determinant,
+        (c02 * r0 + c12 * r1 + c22 * r2) / determinant,
+    )
+
+
+@njit(cache=True)
+def _derivative(x, force, params):
+    d11, d22, d33, d12_part, d13_part, d23_part, c12_part, c13_part, c23_part, g2_part, g3_part = params
+    theta1, theta2 = x[1], x[2]
+    theta1_dot, theta2_dot = x[4], x[5]
+    cos1, cos2 = np.cos(theta1), np.cos(theta2)
+    sin1, sin2 = np.sin(theta1), np.sin(theta2)
+    cos12, sin12 = np.cos(theta1 - theta2), np.sin(theta1 - theta2)
+
+    cart_accel, theta1_accel, theta2_accel = _solve_symmetric_3x3(
+        d11,
+        d12_part * cos1,
+        d13_part * cos2,
+        d22,
+        d23_part * cos12,
+        d33,
+        force - c12_part * sin1 * theta1_dot**2 - c13_part * sin2 * theta2_dot**2,
+        -c23_part * sin12 * theta2_dot**2 - g2_part * sin1,
+        c23_part * sin12 * theta1_dot**2 - g3_part * sin2,
+    )
+
+    return np.array((
+        x[3], theta1_dot, theta2_dot, cart_accel, theta1_accel, theta2_accel,
+    ))
+
+
+@njit(cache=True)
+def _rk4_step(x, force, dt, params):
+    k1 = _derivative(x, force, params)
+    k2 = _derivative(x + 0.5 * dt * k1, force, params)
+    k3 = _derivative(x + 0.5 * dt * k2, force, params)
+    k4 = _derivative(x + dt * k3, force, params)
+    return x + (dt / 6.0) * (k1 + 2.0 * k2 + 2.0 * k3 + k4)
 
 class DoublePendulum:
     """
@@ -61,15 +112,12 @@ class DoublePendulum:
         self.g2_part = self.g*(self.m1+self.m2)*self.l1
         self.g3_part = self.g*self.m2*self.l2
 
-        self.H = np.array([1.0, 0, 0]).reshape(-1, 1)
-        
-        self.fac1 = np.zeros((6, 6))
-        self.fac1[:3, 3:] = np.eye(3)
-
-        self.fac2 = np.zeros((6,1))
-        self.fac3 = np.zeros((6,1))
-
-        self._make_system()
+        self._params = np.array((
+            self.d11, self.d22, self.d33,
+            self.d12_part, self.d13_part, self.d23_part,
+            self.c12_part, self.c13_part, self.c23_part,
+            self.g2_part, self.g3_part,
+        ))
 
     def _initialize(self, seed):
         rng = np.random.default_rng(seed)
@@ -80,7 +128,6 @@ class DoublePendulum:
         init_arr[5] = 0.0001*rng.normal()
         self.x = init_arr
         self._validate_state_arr()
-        self._make_system()
         self.t = 0
 
     def _validate_state_arr(self):
@@ -106,52 +153,10 @@ class DoublePendulum:
         self.x[3] = -self.x[3]
         self.x[0] = np.clip(self.x[0], -rail_pos, rail_pos)
 
-    def D(self):
-        out = np.array([[self.d11, self.d12_part*np.cos(self.x[1]), self.d13_part*np.cos(self.x[2])],
-                        [self.d12_part*np.cos(self.x[1]), self.d22, self.d23_part*np.cos(self.x[1]-self.x[2])],
-                        [self.d13_part*np.cos(self.x[2]), self.d23_part*np.cos(self.x[1]-self.x[2]), self.d33]])
-        return out
-
-    def C(self):
-        out = np.array([[0, self.c12_part*np.sin(self.x[1])*self.x[4], self.c13_part*np.sin(self.x[2])*self.x[5]],
-                        [0, 0, self.c23_part*np.sin(self.x[1]-self.x[2])*self.x[5]],
-                        [0, -self.c23_part*np.sin(self.x[1]-self.x[2])*self.x[4], 0]])
-        return out
-
-    def G(self):
-        return np.array([0, self.g2_part*np.sin(self.x[1]), self.g3_part*np.sin(self.x[2])]).reshape(-1, 1)
-
-    def compute_D_inv_vec_or_matrix(self, V):
-        D = self.D()
-        return scipy.linalg.solve(D, V)
-
-    def _make_system(self):
-        self.fac1[3:, 3:] = -self.compute_D_inv_vec_or_matrix(self.C())
-        self.fac2[3:] = -self.compute_D_inv_vec_or_matrix(self.G())
-        self.fac3[3:] = -self.compute_D_inv_vec_or_matrix(self.H)
-
-    def _RK_step(self, F):
-        self._make_system()
-        def dynam_sys(t, x):
-            return (self.fac1 @ x.reshape(-1, 1) + self.fac2 + self.fac3*F).flatten()
-        solver = itg.RK45(dynam_sys, self.t, self.x, self.t+self.dt, max_step=self.dt)
-        solver.step()
-        self.x = solver.y
-        self._validate_state_arr()
-        self.t = solver.t
-        return solver
-
     def step(self, F):
-        now_time = self.t
-        stop_time = now_time+self.dt
-        ts = []
-        while self.t < stop_time:
-            solver = self._RK_step(F)
-            ts.append(solver.t)
-        interpolant = solver.dense_output()
-        self.x = interpolant(stop_time)
+        self.x = _rk4_step(self.x, float(np.asarray(F).item()), self.dt, self._params)
         self._validate_state_arr()
-        self.t = stop_time
+        self.t += self.dt
 
     def transform_cartesian(self, do_vels=False):
         x_m = self.x[0]
