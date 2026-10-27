@@ -1,3 +1,5 @@
+import math
+
 import gymnasium as gym
 from gymnasium import spaces
 from gymnasium.error import DependencyNotInstalled
@@ -5,6 +7,10 @@ import pygame
 import numpy as np
 
 from ..physics.doublependulum import DoublePendulum
+
+
+def _upright_error(theta):
+    return math.atan2(math.sin(theta - math.pi), math.cos(theta - math.pi))
 
 
 class DoublePendulumEnv(gym.Env):
@@ -35,6 +41,7 @@ class DoublePendulumEnv(gym.Env):
 
         # at current defaults, speed scale is ~3.333 m/s
         self.speed_scale = 0.01*np.mean([self.l1, self.l2])/self.dt
+        self._still_speed = 0.001 * float(np.mean([self.l1, self.l2])) / self.dt
 
         self.pendulum = DoublePendulum(mm=mm, m1=m1, m2=m2, l1=l1, l2=l2, dt=dt)
         self._agent_location=0.0
@@ -75,7 +82,10 @@ class DoublePendulumEnv(gym.Env):
 
     def _get_state(self):
         # This is the raw physical state
-        return np.append(self.pendulum.x, self._agent_location)
+        state = np.empty(7, dtype=np.float64)
+        state[:6] = self.pendulum.x
+        state[6] = self._agent_location
+        return state
 
     def _get_obs(self):
         # now lets scale our raw state into a helpful observation
@@ -86,14 +96,15 @@ class DoublePendulumEnv(gym.Env):
         # angular velocities scaled by pi
         # foce relative to the max
         state = self._get_state()
+        quarter_turn = math.pi / 4
         obs = np.array(
             [
                 state[0] / self.size,
-                np.arctan2(np.sin(state[1] - np.pi), np.cos(state[1] - np.pi)) / (np.pi / 4),
-                np.arctan2(np.sin(state[2] - np.pi), np.cos(state[2] - np.pi)) / (np.pi / 4),
+                _upright_error(state[1]) / quarter_turn,
+                _upright_error(state[2]) / quarter_turn,
                 state[3] / self.speed_scale,
-                state[4] / np.pi,
-                state[5] / np.pi,
+                state[4] / math.pi,
+                state[5] / math.pi,
                 state[6] / self.max_F,
             ],
             dtype=np.float32,
@@ -149,13 +160,13 @@ class DoublePendulumEnv(gym.Env):
             infos.append(self._physics_step())
             if infos[-1]["failure_penalty"]:
                 break
-        shaping = ["control_penalty", "balance_reward"]
+        shaping = ["control_penalty", "balance_reward", "tilt_rate"]
         events = ["failure_penalty", "offtrack_penalty"]
         info = {key: float(np.mean([i[key] for i in infos])) for key in shaping}
         info.update({key: float(sum(i[key] for i in infos)) for key in events})
         info.update({key: any(i[key] for i in infos) for key in ["success", "oob", "offtrack"]})
         terminated = info["failure_penalty"] > 0
-        reward = info["balance_reward"] - info["control_penalty"] - info["offtrack_penalty"]
+        reward = info["balance_reward"] - info["control_penalty"] - info["offtrack_penalty"] - info["tilt_rate"]
 
         if self.render_mode == "human":
             self.render()
@@ -166,25 +177,31 @@ class DoublePendulumEnv(gym.Env):
         # Apply the current force to the pendulum for one physics step
         self.pendulum.step(F=self._agent_location)
         self.state = self._get_state()
+        cartesian = self.pendulum.transform_cartesian(do_vels=True)
 
-        success, offtrack, oob = self._success_offtrack_or_oob()
+        success, offtrack, oob = self._success_offtrack_or_oob(cartesian)
         if offtrack:
             # Clip the pendulum to the track and reverse its momentum.
             self.pendulum.bounce(rail_pos=self.size)
             self.state = self._get_state()
+            cartesian = self.pendulum.transform_cartesian(do_vels=True)
 
-        theta1_err = np.arctan2(np.sin(self.state[1] - np.pi), np.cos(self.state[1] - np.pi))
-        theta2_err = np.arctan2(np.sin(self.state[2] - np.pi), np.cos(self.state[2] - np.pi))
+        theta1_err = _upright_error(self.state[1])
+        theta2_err = _upright_error(self.state[2])
         # Full force costs 1e-5, below the upright change from one decision on this plant.
         control_penalty = 1e-5 * (self.state[6] / self.max_F) ** 2.0
-        balance_reward = 0.5 * (max(0.0, np.cos(theta1_err)) + max(0.0, np.cos(theta2_err)))
+        balance_reward = 0.5 * (max(0.0, math.cos(theta1_err)) + max(0.0, math.cos(theta2_err)))
+        # Positive when a pole is rotating further from upright, negative when it is rotating back.
+        # Weight 100 makes a few degrees of lean at a few degrees per second worth a few tenths of a point.
+        tilt_rate = 100.0 * (theta1_err * self.state[4] + theta2_err * self.state[5])
         # Marks a fall for termination. The return itself is the balance score that stops arriving.
-        failure_penalty = 0.0 if self.healthy else 1.0
+        failure_penalty = 0.0 if self._head_is_up(cartesian) else 1.0
         offtrack_penalty = 1.0 if offtrack else 0.0
 
         return {
             "control_penalty": float(control_penalty),
             "balance_reward": float(balance_reward),
+            "tilt_rate": float(tilt_rate),
             "failure_penalty": float(failure_penalty),
             "offtrack_penalty": float(offtrack_penalty),
             "success": bool(success),
@@ -196,8 +213,10 @@ class DoublePendulumEnv(gym.Env):
     def healthy(self):
         # We're healthy if the second head is above the first
         # and both are above 0.5 * l1
-        cart_coord = self.pendulum.transform_cartesian(do_vels=True)
-        y2 = cart_coord[2][1]/(self.l1+self.l2)/0.3 # originally, each pole was 0.6
+        return self._head_is_up(self.pendulum.transform_cartesian(do_vels=True))
+
+    def _head_is_up(self, cartesian):
+        y2 = cartesian[2][1] / (self.l1 + self.l2) / 0.3 # originally, each pole was 0.6
         return y2 >= 1
 
     def _distance(self):
@@ -206,30 +225,31 @@ class DoublePendulumEnv(gym.Env):
         raw_dist[1] = np.atan2(np.sin(raw_dist[1]), np.cos(raw_dist[1]))
         return raw_dist
 
-    def _increment_success_frames_or_reset(self):
+    def _increment_success_frames_or_reset(self, cartesian):
         s = self.state
         assert s is not None, "Call reset before using DoublePendulumEnv object."
-        thetas = s[1:3]
-        cart_coord = self.pendulum.transform_cartesian(do_vels=True)
-        vm = cart_coord[3]
-        v1 = np.linalg.norm(cart_coord[4])
-        v2 = np.linalg.norm(cart_coord[5])
+        vm = cartesian[3]
+        v1 = math.hypot(*cartesian[4])
+        v2 = math.hypot(*cartesian[5])
         # we're up if all thetas are pi
-        up = np.all([np.abs(np.atan2(np.sin(thet - np.pi), np.cos(thet - np.pi))) < self.theta_tol for thet in thetas])
+        up = (
+            abs(_upright_error(s[1])) < self.theta_tol
+            and abs(_upright_error(s[2])) < self.theta_tol
+        )
         # we're "still" if all velocities are less than a tenth%
         # of the relevant length and time scales
-        still = np.allclose([vm, v1, v2], 0.0, atol=0.001*np.mean([self.l1, self.l2])/self.dt)
-        if up & still:
+        still = abs(vm) <= self._still_speed and abs(v1) <= self._still_speed and abs(v2) <= self._still_speed
+        if up and still:
             self.success_frames += 1
         else:
             self.success_frames = 0
         return s
 
-    def _success_offtrack_or_oob(self):
-        s = self._increment_success_frames_or_reset()
+    def _success_offtrack_or_oob(self, cartesian):
+        s = self._increment_success_frames_or_reset(cartesian)
         success = self.success_frames * self.dt >= self.SUCCESS_TIME
         pos = s[0]
-        offtrack = np.abs(pos) > self.size
+        offtrack = abs(pos) > self.size
         oob = not (np.all(s >= self._state_low) & np.all(s <= self._state_high))
         return success, offtrack, oob
 

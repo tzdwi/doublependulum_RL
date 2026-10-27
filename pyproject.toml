@@ -10,6 +10,7 @@ name = "DoublePendulum"
 version = "0.0.1"
 dependencies = [
   "gymnasium",
+  "numba>=0.62",
   "pygame>=2.1.3",
   "pre-commit",
 ]
