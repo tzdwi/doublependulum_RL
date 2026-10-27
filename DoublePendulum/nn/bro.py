@@ -20,7 +20,7 @@ import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
 
-from .nn_common import this_dir, plot_dir, vid_dir, init_env, device, Transition, ReplayMemory, warmup_action, EarlyStop
+from .nn_common import this_dir, plot_dir, vid_dir, init_env, device, Transition, ReplayMemory, warmup_action, EarlyStop, polyak_update
 
 import imageio
 
@@ -359,14 +359,9 @@ class BRO_Learner:
 
         # Step 11 (run early; steps 4-10 use only the online critics): Update target networks
         # Polyak averaging to update target nets
-        for net, target in zip([self.Q_net_1, self.Q_net_2], 
+        for net, target in zip([self.Q_net_1, self.Q_net_2],
                                 [self.Q_target_1, self.Q_target_2]):
-            net_state_dict = net.state_dict()
-            target_state_dict = target.state_dict()
-            for key in net_state_dict:
-                target_state_dict[key] = target_state_dict[key]*self.POLYAK + net_state_dict[key]*(1-self.POLYAK)
-        
-            target.load_state_dict(target_state_dict)
+            polyak_update(net, target, self.POLYAK)
 
         if not do_policy_step:
             torch.cuda.empty_cache()

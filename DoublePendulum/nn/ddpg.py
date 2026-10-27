@@ -15,7 +15,7 @@ import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
 
-from .nn_common import this_dir, plot_dir, vid_dir, init_env, device, Transition, ReplayMemory, warmup_action, EarlyStop
+from .nn_common import this_dir, plot_dir, vid_dir, init_env, device, Transition, ReplayMemory, warmup_action, EarlyStop, polyak_update
 
 import imageio
 
@@ -325,19 +325,8 @@ class DDPG_Learner:
                     self.optimize_model(do_policy_step=actor_ready and (t % self.policy_delay == 0))
             
                     # Polyak averaging to update target nets
-                    Q_net_state_dict = self.Q_net.state_dict()
-                    policy_net_state_dict = self.policy_net.state_dict()
-    
-                    Q_target_state_dict = self.Q_target.state_dict()
-                    policy_target_state_dict = self.policy_target.state_dict()
-    
-                    for key in Q_net_state_dict:
-                        Q_target_state_dict[key] = Q_target_state_dict[key]*self.TAU + Q_net_state_dict[key]*(1-self.TAU)
-                    for key in policy_net_state_dict:
-                        policy_target_state_dict[key] = policy_target_state_dict[key]*self.TAU + policy_net_state_dict[key]*(1-self.TAU)
-                    
-                    self.Q_target.load_state_dict(Q_target_state_dict)
-                    self.policy_target.load_state_dict(policy_target_state_dict)
+                    polyak_update(self.Q_net, self.Q_target, self.TAU)
+                    polyak_update(self.policy_net, self.policy_target, self.TAU)
         
                 if done:
                     self.episode_durations.append(t + 1)

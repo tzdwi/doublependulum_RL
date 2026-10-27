@@ -15,7 +15,7 @@ import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
 
-from .nn_common import this_dir, plot_dir, vid_dir, init_env, device, Transition, ReplayMemory, warmup_action, EarlyStop
+from .nn_common import this_dir, plot_dir, vid_dir, init_env, device, Transition, ReplayMemory, warmup_action, EarlyStop, polyak_update
 
 import imageio
 
@@ -99,7 +99,11 @@ class SAC_Learner:
                  actor_holdback=20000,
                  start_steps=2000,
                  buffer_length=1e6,
-                 log_progress=False):
+                 log_progress=False,
+                 obs_center=None,
+                 obs_spread=None,
+                 reward_scale=1.0,
+                 freeze_alpha=False):
 
         self.env = init_env(size=size,
                             max_F=max_F,
@@ -145,8 +149,12 @@ class SAC_Learner:
         self.state = state
         n_observations = len(state)
         self.scale = float(self.env.action_space.high[0])
+        self.reward_scale = reward_scale
+        self.obs_center = obs_center
+        self.obs_spread = obs_spread
+        self.freeze_alpha = freeze_alpha
 
-        self.log_alpha = torch.tensor(math.log(alpha), device=device, requires_grad=True)
+        self.log_alpha = torch.tensor(math.log(alpha / reward_scale), device=device, requires_grad=True)
         self.alpha_optimizer = optim.Adam([self.log_alpha], lr=self.LR)
         # -dim(A) in [-1, 1] action units; logprobs here are in force units, hence the log(scale) shift.
         self.target_entropy = math.log(self.scale) - 1.0
@@ -192,7 +200,7 @@ class SAC_Learner:
             action = torch.as_tensor(warmup_action(self.env.action_space), device=device, dtype=torch.float32).view(1, 1)
         else:
             with torch.no_grad():
-                action_mu, action_logsig = self.policy_net(state).chunk(2, dim=-1)
+                action_mu, action_logsig = self.policy_net(self._condition(state)).chunk(2, dim=-1)
                 if not do_deterministic:
                     action_logsig = action_logsig.clamp(-20, 2)
                     dist = torch.distributions.Normal(action_mu, torch.exp(action_logsig))
@@ -202,6 +210,11 @@ class SAC_Learner:
                 action = self.scale*F.tanh(act)
 
         return torch.clamp(action, float(self.env.action_space.low[0]), float(self.env.action_space.high[0]))
+
+    def _condition(self, state):
+        if self.obs_center is None:
+            return state
+        return (state - self.obs_center) / self.obs_spread
         
     def optimize_model(self, do_policy_step=False):
         # if our memory is shorter than the batch size, then 
@@ -222,11 +235,11 @@ class SAC_Learner:
         if not non_final_mask.any():
             non_final_next_states = torch.tensor([])
         else:
-            non_final_next_states = torch.cat([s for s in batch.next_state
-                                                    if s is not None])
-        state_batch = torch.cat(batch.state)
+            non_final_next_states = self._condition(torch.cat([s for s in batch.next_state
+                                                    if s is not None]))
+        state_batch = self._condition(torch.cat(batch.state))
         action_batch = torch.cat(batch.action)
-        reward_batch = torch.cat(batch.reward)
+        reward_batch = torch.cat(batch.reward) / self.reward_scale
 
         # Compute Q(s, a)
         # state_batch is shape N_batch x n_observations
@@ -294,6 +307,8 @@ class SAC_Learner:
         torch.nn.utils.clip_grad_value_(self.policy_net.parameters(), 100)
         self.policy_optimizer.step()
 
+        if self.freeze_alpha:
+            return
         alpha_loss = -(self.log_alpha * (logprobs.detach() + self.target_entropy)).mean()
         self.alpha_optimizer.zero_grad()
         alpha_loss.backward()
@@ -318,14 +333,14 @@ class SAC_Learner:
         imageio.mimsave(vid_dir+f"/sac_ep{episode_number}.mp4", frames, fps=self.log_env.metadata["render_fps"])
             
     
-    def train(self, progress=False, make_plots=False, num_episodes = None):
+    def train(self, progress=False, make_plots=False, num_episodes = None, start_episode=0):
         if not num_episodes:
             if torch.cuda.is_available() or torch.backends.mps.is_available():
                 num_episodes = 600
             else:
                 num_episodes = 50
 
-        iterator = range(num_episodes)
+        iterator = range(start_episode, num_episodes)
         if progress:
             iterator = tqdm(iterator)
 
@@ -368,14 +383,9 @@ class SAC_Learner:
                     self.optimize_model(do_policy_step=actor_ready and (t % self.policy_delay == 0))
             
                     # Polyak averaging to update target nets
-                    for net, target in zip([self.Q_net_1, self.Q_net_2], 
+                    for net, target in zip([self.Q_net_1, self.Q_net_2],
                                            [self.Q_target_1, self.Q_target_2]):
-                        net_state_dict = net.state_dict()
-                        target_state_dict = target.state_dict()
-                        for key in net_state_dict:
-                            target_state_dict[key] = target_state_dict[key]*self.TAU + net_state_dict[key]*(1-self.TAU)
-                    
-                        target.load_state_dict(target_state_dict)
+                        polyak_update(net, target, self.TAU)
         
                 if done:
                     self.episode_durations.append(t + 1)

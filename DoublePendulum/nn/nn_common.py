@@ -12,6 +12,10 @@ from pathlib import Path
 
 from .. import max_seconds
 
+# Distribution checks synchronize the GPU on every sample. The policy already
+# clamps its standard deviation, so skip the checks during training.
+torch.distributions.Distribution.set_default_validate_args(False)
+
 this_dir = str(os.path.dirname(os.path.realpath(__file__)))
 plot_dir = str(Path(__file__).parent.parent.parent)+"/scripts/figures"
 vid_dir = str(Path(__file__).parent.parent.parent)+"/scripts/videos"
@@ -34,6 +38,10 @@ def init_env(size=50, max_F=25.0, max_ang_vel=4*np.pi, mm=5.0, m1=0.5, l1=10.0, 
                    render_mode=render_mode
                   )
     return env
+
+def polyak_update(online, target, tau):
+    with torch.no_grad():
+        torch._foreach_lerp_(list(target.parameters()), list(online.parameters()), 1 - tau)
 
 def warmup_action(action_space):
     scale = float(action_space.high[0])
