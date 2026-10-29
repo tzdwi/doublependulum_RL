@@ -132,22 +132,15 @@ class DoublePendulum:
 
     def _validate_state_arr(self):
         """
-        If down is theta=0, and our goal is up (theta=pi), lets wrap at
-        -pi/2 / 3pi/2
+        If down is theta=0, and our goal is up (theta=pi), wrap into
+        [-pi/2, 3pi/2]. Non-finite angles are left unchanged.
         """
-        for i in [1,2]:
-            changed = False
+        low = -np.pi / 2
+        high = 3 * np.pi / 2
+        for i in (1, 2):
             theta = self.x[i]
-            while theta < -np.pi/2:
-                if not changed:
-                    changed = True
-                theta += 2*np.pi
-            while theta > 3*np.pi/2:
-                if not changed:
-                    changed = True
-                theta -= 2*np.pi
-            if changed:
-                self.x[i] = theta
+            if np.isfinite(theta) and (theta < low or theta > high):
+                self.x[i] = low + np.mod(theta - low, 2 * np.pi)
     
     def bounce(self, rail_pos=50.0):
         self.x[3] = -self.x[3]

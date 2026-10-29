@@ -16,6 +16,7 @@ from DoublePendulum.nn.sac import SAC_Learner, SAC_POLICY_DP, SAC_Q_DP
 TERMS = [
     "balance_reward",
     "tilt_rate",
+    "speed_penalty",
     "control_penalty",
     "offtrack_penalty",
 ]
@@ -3572,6 +3573,117 @@ def scaled_sac(env, gain, freeze_alpha=False):
     library_outcome(label, build, trace=True, gain=gain)
 
 
+class ProtectedReplay:
+    def __init__(self, fifo_capacity, protected_capacity):
+        from collections import deque
+
+        self.memory = deque(maxlen=fifo_capacity)
+        self.protected_capacity = protected_capacity
+        self._episodes = {}
+        self._protected = []
+        self._lengths = []
+
+    def push(self, *args, env_index=0):
+        transition = Transition(*args)
+        self.memory.append(transition)
+        self._episodes.setdefault(env_index, []).append(transition)
+
+    def end_episode(self, success, env_index=0):
+        episode = self._episodes.pop(env_index, [])
+        if not success or not episode:
+            return
+        self._protected.extend(episode)
+        self._lengths.append(len(episode))
+        while len(self._protected) > self.protected_capacity and self._lengths:
+            drop = self._lengths.pop(0)
+            del self._protected[:drop]
+
+    def sample(self, batch_size):
+        half = batch_size // 2
+        if len(self._protected) < half:
+            return random.sample(self.memory, batch_size)
+        return random.sample(self._protected, half) + random.sample(self.memory, batch_size - half)
+
+    def __len__(self):
+        return len(self.memory)
+
+    @property
+    def protected_count(self):
+        return len(self._protected)
+
+
+def speed_penalty_run(env, gain, protected=False, adam_betas=None):
+    observations = []
+    for seed in range(20):
+        observation, _ = env.reset(seed=seed)
+        done = False
+        while not done:
+            observations.append(np.asarray(observation, dtype=np.float64))
+            observation, _, terminated, truncated, _ = env.step(lqr_force(env, gain))
+            done = terminated or truncated
+    columns = np.vstack(observations)
+    center = torch.tensor(columns.mean(axis=0), dtype=torch.float32, device=device)
+    spread = torch.tensor(np.maximum(columns.std(axis=0), 1e-8), dtype=torch.float32, device=device)
+    print("observation center " + " ".join(f"{value:.6f}" for value in center.tolist()), flush=True)
+    print("observation spread " + " ".join(f"{value:.6f}" for value in spread.tolist()), flush=True)
+    _reseed(0)
+    library_outcome.best = None
+    if protected and adam_betas is not None:
+        label = "protected tuned adam"
+    elif protected:
+        label = "protected replay"
+    elif adam_betas is not None:
+        label = "tuned adam"
+    else:
+        label = "speed penalty 2M"
+    learner = SAC_Learner(
+        obs_center=center,
+        obs_spread=spread,
+        reward_scale=100.0,
+        freeze_alpha=True,
+        buffer_length=1_800_000 if protected else 2_000_000,
+        adam_betas=adam_betas if adam_betas is not None else (0.9, 0.999),
+    )
+    if adam_betas is not None:
+        print(
+            f"adam betas {learner.Q_optimizer.defaults['betas'][0]} "
+            f"{learner.Q_optimizer.defaults['betas'][1]} "
+            f"amsgrad {learner.Q_optimizer.defaults['amsgrad']}",
+            flush=True,
+        )
+    if protected:
+        learner.memory = ProtectedReplay(1_800_000, 200_000)
+        print("protected archive 200000 fifo 1800000", flush=True)
+    learner.dump_best = lambda *args, **kwargs: None
+    original_reset = learner.env.reset
+
+    def reset(*args, **kwargs):
+        seed = kwargs.get("seed")
+        if seed is not None and seed >= 100:
+            kwargs["seed"] = seed + 20
+        return original_reset(*args, **kwargs)
+
+    learner.env.reset = reset
+    _audited_train(learner, gain, label, 8000, 0, lambda *args: None)
+    successes = learner.final_state_balanced
+    print(
+        f"{label} finished episodes {len(learner.episode_durations)} "
+        f"steps {learner.steps_done} training successes {int(sum(successes))}/{len(successes)}",
+        flush=True,
+    )
+    best = library_outcome.best
+    if best is not None:
+        current = {key: value.detach().cpu().clone() for key, value in learner.policy_net.state_dict().items()}
+        learner.policy_net.load_state_dict(best["policy"])
+        _preserved_rng(lambda: _scaled_audit(
+            f"{label} best", learner, gain, best["episode"], successes, learner.episode_durations,
+        ))
+        learner.policy_net.load_state_dict(current)
+    del learner
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+
 def _polyak(learner):
     for net, target in ((learner.Q_net_1, learner.Q_target_1), (learner.Q_net_2, learner.Q_target_2)):
         net_state = net.state_dict()
@@ -4176,7 +4288,7 @@ def _scaled_audit(name, learner, gain, counted, successes, durations):
     episode_successes, lengths, openings = [], [], []
     stochastic_successes, stochastic_lengths = [], []
     pre_means, pre_stds, force_stds = [], [], []
-    upright_fractions, upright_speeds, holds = [], [], []
+    upright_fractions, upright_speeds, holds, speed_penalties = [], [], [], []
     values, slopes, toward = [], [], 0
     for seed in range(100, 120):
         observation, _ = probe.reset(seed=seed)
@@ -4206,9 +4318,11 @@ def _scaled_audit(name, learner, gain, counted, successes, durations):
         opening = abs(float(action))
         info = {}
         upright_steps, speeds_when_upright, hold = 0, [], 0.0
+        penalty_sum = 0.0
         while not done:
             observation, _, terminated, truncated, info = probe.step(float(action))
             length += 1
+            penalty_sum += float(info["speed_penalty"])
             done = terminated or truncated
             physical = wrapped_error(probe.unwrapped.pendulum.x)
             tilt = float(np.max(np.abs(physical[1:3])))
@@ -4227,6 +4341,7 @@ def _scaled_audit(name, learner, gain, counted, successes, durations):
         upright_fractions.append(upright_steps / length)
         upright_speeds.append(float(np.median(speeds_when_upright)) if speeds_when_upright else np.nan)
         holds.append(hold)
+        speed_penalties.append(penalty_sum / length)
         observation, _ = probe.reset(seed=seed)
         done = False
         length = 0
@@ -4259,6 +4374,8 @@ def _scaled_audit(name, learner, gain, counted, successes, durations):
         print(f"{name} kept policy at episode {counted}", flush=True)
     narrow = int(np.sum(tilts < 0.01))
     wide = int(np.sum(tilts < 0.1))
+    protected_count = getattr(learner.memory, "protected_count", None)
+    protected_note = "" if protected_count is None else f"protected {protected_count} "
     print(
         f"{name} episode {counted} steps {learner.steps_done} "
         f"training successes {int(sum(successes))}/{counted} "
@@ -4271,9 +4388,11 @@ def _scaled_audit(name, learner, gain, counted, successes, durations):
         f"force std {np.median(force_stds):.3f} "
         f"upright fraction {np.median(upright_fractions):.3f} "
         f"upright speed/limit {np.nanmedian(upright_speeds):.3f} "
+        f"speed penalty {np.median(speed_penalties):.3f} "
         f"longest hold {np.median(holds):.2f}s "
         f"median Q {np.median(values):.3f} median dQ/dF {np.median(slopes):.6f} "
         f"toward LQR {toward}/20 "
+        f"{protected_note}"
         f"replay within 0.01 rad {narrow}/{len(tilts)} within 0.1 rad {wide}/{len(tilts)}",
         flush=True,
     )

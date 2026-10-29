@@ -148,10 +148,10 @@ class DoublePendulumEnv(gym.Env):
         return self._clip_obs(observation), info
 
     def step(self, action):
-        # Update current force, clipped to current boundaries
-        self._agent_location = np.clip(
-            action, -self.max_F, self.max_F
-        )
+        # Update current force, clipped to current boundaries.
+        # The action space is a length-1 box, so a vector step sends shape (1,).
+        force = float(np.reshape(action, -1)[0])
+        self._agent_location = float(np.clip(force, -self.max_F, self.max_F))
         # Hold the force for action_repeat physics steps. The balance score is averaged so each
         # decision is about 1 while upright. A fall ends the episode; the five-second success
         # flag is recorded and does not end it.
@@ -160,13 +160,19 @@ class DoublePendulumEnv(gym.Env):
             infos.append(self._physics_step())
             if infos[-1]["failure_penalty"]:
                 break
-        shaping = ["control_penalty", "balance_reward", "tilt_rate"]
+        shaping = ["control_penalty", "balance_reward", "tilt_rate", "speed_penalty"]
         events = ["failure_penalty", "offtrack_penalty"]
         info = {key: float(np.mean([i[key] for i in infos])) for key in shaping}
         info.update({key: float(sum(i[key] for i in infos)) for key in events})
         info.update({key: any(i[key] for i in infos) for key in ["success", "oob", "offtrack"]})
         terminated = info["failure_penalty"] > 0
-        reward = info["balance_reward"] - info["control_penalty"] - info["offtrack_penalty"] - info["tilt_rate"]
+        reward = (
+            info["balance_reward"]
+            - info["control_penalty"]
+            - info["offtrack_penalty"]
+            - info["tilt_rate"]
+            - info["speed_penalty"]
+        )
 
         if self.render_mode == "human":
             self.render()
@@ -194,6 +200,11 @@ class DoublePendulumEnv(gym.Env):
         # Positive when a pole is rotating further from upright, negative when it is rotating back.
         # Weight 100 makes a few degrees of lean at a few degrees per second worth a few tenths of a point.
         tilt_rate = 100.0 * (theta1_err * self.state[4] + theta2_err * self.state[5])
+        # Penalize motion above the same Cartesian speed threshold used for success.
+        # This is continuous in both speed and angle, and capped below the balance reward.
+        max_speed = max(abs(cartesian[3]), math.hypot(*cartesian[4]), math.hypot(*cartesian[5]))
+        speed_excess = max(0.0, max_speed / self._still_speed - 1.0)
+        speed_penalty = 0.5 * speed_excess / (speed_excess + 50.0)
         # Marks a fall for termination. The return itself is the balance score that stops arriving.
         failure_penalty = 0.0 if self._head_is_up(cartesian) else 1.0
         offtrack_penalty = 1.0 if offtrack else 0.0
@@ -202,6 +213,7 @@ class DoublePendulumEnv(gym.Env):
             "control_penalty": float(control_penalty),
             "balance_reward": float(balance_reward),
             "tilt_rate": float(tilt_rate),
+            "speed_penalty": float(speed_penalty),
             "failure_penalty": float(failure_penalty),
             "offtrack_penalty": float(offtrack_penalty),
             "success": bool(success),

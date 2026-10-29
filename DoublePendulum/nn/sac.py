@@ -15,7 +15,7 @@ import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
 
-from .nn_common import this_dir, plot_dir, vid_dir, init_env, device, Transition, ReplayMemory, warmup_action, EarlyStop, polyak_update
+from .nn_common import this_dir, plot_dir, vid_dir, init_env, device, Transition, ReplayMemory, warmup_action, EarlyStop, polyak_update, prepare_parallel, run_parallel
 
 import imageio
 
@@ -103,7 +103,9 @@ class SAC_Learner:
                  obs_center=None,
                  obs_spread=None,
                  reward_scale=1.0,
-                 freeze_alpha=False):
+                 freeze_alpha=False,
+                 adam_betas=(0.9, 0.999),
+                 num_envs=1):
 
         self.env = init_env(size=size,
                             max_F=max_F,
@@ -174,9 +176,9 @@ class SAC_Learner:
         
         self.Q_optimizer = optim.AdamW([{"params":self.Q_net_1.parameters()},
                                        {"params":self.Q_net_2.parameters()}],
-                                       lr=self.LR, amsgrad=True)
+                                       lr=self.LR, betas=adam_betas, amsgrad=True)
         self.policy_optimizer = optim.AdamW(self.policy_net.parameters(), 
-                                            lr=self.LR, amsgrad=True)
+                                            lr=self.LR, betas=adam_betas, amsgrad=True)
         # Mean squared error loss
         self.criterion = nn.MSELoss()
         self.memory = ReplayMemory(int(buffer_length))
@@ -188,6 +190,9 @@ class SAC_Learner:
         self.cumulative_rewards = []
         self.final_state_balanced = []
         self.final_state_truncated = []
+        prepare_parallel(self, num_envs,
+                         size=size, max_F=max_F, max_ang_vel=max_ang_vel,
+                         mm=mm, m1=m1, l1=l1, m2=m2, l2=l2, dt=dt, theta_tol=theta_tol)
 
     def select_action(self, state, do_deterministic=False):
         """
@@ -331,14 +336,31 @@ class SAC_Learner:
             done = terminated or truncated
             state = torch.tensor(observation, dtype=torch.float32, device=device).unsqueeze(0)
         imageio.mimsave(vid_dir+f"/sac_ep{episode_number}.mp4", frames, fps=self.log_env.metadata["render_fps"])
-            
-    
+
+    def _actor_started(self):
+        return self.steps_done > self.start_steps + self.actor_holdback
+
+    def _parallel_update(self, step_index, early):
+        if len(self.memory) > self.start_steps:
+            actor_ready = self._actor_started()
+            self.optimize_model(do_policy_step=actor_ready and (step_index % self.policy_delay == 0))
+            for net, target in zip([self.Q_net_1, self.Q_net_2],
+                                   [self.Q_target_1, self.Q_target_2]):
+                polyak_update(net, target, self.TAU)
+
     def train(self, progress=False, make_plots=False, num_episodes = None, start_episode=0):
         if not num_episodes:
             if torch.cuda.is_available() or torch.backends.mps.is_available():
                 num_episodes = 600
             else:
                 num_episodes = 50
+
+        if self.num_envs > 1:
+            run_parallel(
+                self, num_episodes, start_episode,
+                lambda states: [self.select_action(state) for state in states],
+                self._parallel_update, self._actor_started, progress)
+            return
 
         iterator = range(start_episode, num_episodes)
         if progress:
@@ -388,6 +410,9 @@ class SAC_Learner:
                         polyak_update(net, target, self.TAU)
         
                 if done:
+                    end_episode = getattr(self.memory, "end_episode", None)
+                    if end_episode is not None:
+                        end_episode(bool(info["success"]))
                     self.episode_durations.append(t + 1)
                     self.cumulative_rewards.append(cumulative_reward)
                     if info["success"]:

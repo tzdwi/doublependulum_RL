@@ -15,7 +15,7 @@ import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
 
-from .nn_common import this_dir, plot_dir, vid_dir, init_env, device, Transition, ReplayMemory, warmup_action, EarlyStop
+from .nn_common import this_dir, plot_dir, vid_dir, init_env, device, Transition, ReplayMemory, warmup_action, EarlyStop, prepare_parallel, run_parallel
 
 import imageio
 
@@ -113,7 +113,8 @@ class CrossQ_Learner:
                  buffer_length=1e6,
                  policy_delay=3,
                  actor_holdback=20000,
-                 log_progress=False):
+                 log_progress=False,
+                 num_envs=1):
 
         self.env = init_env(size=size,
                             max_F=max_F,
@@ -190,6 +191,9 @@ class CrossQ_Learner:
         self.cumulative_rewards = []
         self.final_state_balanced = []
         self.final_state_truncated = []
+        prepare_parallel(self, num_envs,
+                         size=size, max_F=max_F, max_ang_vel=max_ang_vel,
+                         mm=mm, m1=m1, l1=l1, m2=m2, l2=l2, dt=dt, theta_tol=theta_tol)
 
     def select_action(self, state, do_deterministic=False):
         """
@@ -349,14 +353,28 @@ class CrossQ_Learner:
             done = terminated or truncated
             state = torch.tensor(observation, dtype=torch.float32, device=device).unsqueeze(0)
         imageio.mimsave(vid_dir+f"/crossq_ep{episode_number}.mp4", frames, fps=self.log_env.metadata["render_fps"])
-            
-    
+
+    def _actor_started(self):
+        return self.steps_done > self.start_steps + self.actor_holdback
+
+    def _parallel_update(self, step_index, early):
+        if len(self.memory) > self.start_steps:
+            actor_ready = self._actor_started()
+            self.optimize_model(do_policy_step=actor_ready and (step_index % self.policy_delay == 0))
+
     def train(self, progress=False, make_plots=False, num_episodes = None):
         if not num_episodes:
             if torch.cuda.is_available() or torch.backends.mps.is_available():
                 num_episodes = 600
             else:
                 num_episodes = 50
+
+        if self.num_envs > 1:
+            run_parallel(
+                self, num_episodes, 0,
+                lambda states: [self.select_action(state) for state in states],
+                self._parallel_update, self._actor_started, progress)
+            return
 
         iterator = range(num_episodes)
         if progress:
