@@ -3704,7 +3704,7 @@ def speed_penalty_run(env, gain, protected=False, adam_betas=None, archive_bc=Fa
     elif adam_betas is not None:
         label = "tuned adam"
     elif not freeze_alpha:
-        label = "learnable alpha 2M"
+        label = "sac target -1"
     else:
         label = "steep speed 2M"
     learner = SAC_Learner(
@@ -3717,7 +3717,11 @@ def speed_penalty_run(env, gain, protected=False, adam_betas=None, archive_bc=Fa
         archive_bc=bool(protected and archive_bc),
         **({} if alpha is None else {"alpha": alpha}),
     )
-    print(f"entropy weight {learner.log_alpha.exp().item():.6f}", flush=True)
+    print(
+        f"entropy weight {learner.log_alpha.exp().item():.6f} "
+        f"target entropy {learner.target_entropy:.3f}",
+        flush=True,
+    )
     if adam_betas is not None:
         print(
             f"adam betas {learner.Q_optimizer.defaults['betas'][0]} "
@@ -3731,15 +3735,6 @@ def speed_penalty_run(env, gain, protected=False, adam_betas=None, archive_bc=Fa
         if archive_bc:
             print("archive bc on", flush=True)
     learner.dump_best = lambda *args, **kwargs: None
-    original_reset = learner.env.reset
-
-    def reset(*args, **kwargs):
-        seed = kwargs.get("seed")
-        if seed is not None and seed >= 100:
-            kwargs["seed"] = seed + 20
-        return original_reset(*args, **kwargs)
-
-    learner.env.reset = reset
     _audited_train(learner, gain, label, 8000, 0, lambda *args: None)
     successes = learner.final_state_balanced
     print(
@@ -3780,15 +3775,6 @@ def ddpg_scaled_run(env, gain):
         flush=True,
     )
     learner.dump_best = lambda *args, **kwargs: None
-    original_reset = learner.env.reset
-
-    def reset(*args, **kwargs):
-        seed = kwargs.get("seed")
-        if seed is not None and seed >= 100:
-            kwargs["seed"] = seed + 20
-        return original_reset(*args, **kwargs)
-
-    learner.env.reset = reset
     label = "scaled ddpg"
     _audited_train(learner, gain, label, 8000, 0, lambda *args: None)
     successes = learner.final_state_balanced
@@ -4020,15 +4006,6 @@ def frozen_replay_split(env, gain):
         learner = SAC_Learner(obs_center=center, obs_spread=spread, reward_scale=100.0, freeze_alpha=True)
         learner.dump_best = lambda *args, **kwargs: None
         remembering_check.learner = learner
-        original_reset = learner.env.reset
-
-        def reset(*args, **kwargs):
-            seed = kwargs.get("seed")
-            if seed is not None and seed >= 100:
-                kwargs["seed"] = seed + 20
-            return original_reset(*args, **kwargs)
-
-        learner.env.reset = reset
         learner.train(num_episodes=4000)
     finally:
         EarlyStop.check = original_check
@@ -4126,15 +4103,6 @@ def replay_swap(env, gain):
         learner = SAC_Learner(obs_center=center, obs_spread=spread, reward_scale=100.0, freeze_alpha=True)
         learner.dump_best = lambda *args, **kwargs: None
         remembering_check.learner = learner
-        original_reset = learner.env.reset
-
-        def reset(*args, **kwargs):
-            seed = kwargs.get("seed")
-            if seed is not None and seed >= 100:
-                kwargs["seed"] = seed + 20
-            return original_reset(*args, **kwargs)
-
-        learner.env.reset = reset
         learner.train(num_episodes=8000)
         del learner
         if torch.cuda.is_available():
@@ -4215,15 +4183,6 @@ def _continue_live(captured, gain, label, maxlen, num_episodes):
     _restore_rng(captured["rng"])
     learner = _live_learner(captured, maxlen)
     learner.dump_best = lambda *args, **kwargs: None
-    original_reset = learner.env.reset
-
-    def reset(*args, **kwargs):
-        seed = kwargs.get("seed")
-        if seed is not None and seed >= 100:
-            kwargs["seed"] = seed + 20
-        return original_reset(*args, **kwargs)
-
-    learner.env.reset = reset
     start = captured["episode"]
     learner.episode_durations = [1] * start
     learner.final_state_balanced = [0] * start
@@ -4287,15 +4246,6 @@ def failure_tests(env, gain):
         _reseed(0)
         learner = SAC_Learner(obs_center=center, obs_spread=spread, reward_scale=100.0, freeze_alpha=True)
         learner.dump_best = lambda *args, **kwargs: None
-        original_reset = learner.env.reset
-
-        def reset(*args, **kwargs):
-            seed = kwargs.get("seed")
-            if seed is not None and seed >= 100:
-                kwargs["seed"] = seed + 20
-            return original_reset(*args, **kwargs)
-
-        learner.env.reset = reset
         _audited_train(learner, gain, "buffer 1M", 8000, 0, on_audit)
         del learner
         if torch.cuda.is_available():
@@ -4372,15 +4322,6 @@ def library_outcome(name, builder=None, trace=False, gain=None):
     learner = builder() if builder else learners[name]()
     learner.dump_best = lambda *args, **kwargs: None
     library_outcome.learner = learner
-    original_reset = learner.env.reset
-
-    def reset(*args, **kwargs):
-        seed = kwargs.get("seed")
-        if seed is not None and seed >= 100:
-            kwargs["seed"] = seed + 20
-        return original_reset(*args, **kwargs)
-
-    learner.env.reset = reset
     episodes = 2000 if name == "BRO" else 20000
     learner.train(num_episodes=episodes)
     successes = learner.final_state_balanced
@@ -4411,7 +4352,7 @@ def _scaled_audit(name, learner, gain, counted, successes, durations):
     pre_means, pre_stds, force_stds = [], [], []
     upright_fractions, upright_speeds, holds, speed_penalties = [], [], [], []
     values, slopes, toward = [], [], 0
-    scale = float(getattr(learner, "scale", learner.policy_net.scale))
+    scale = float(learner.scale if hasattr(learner, "scale") else learner.policy_net.scale)
     gaussian = None
     for seed in range(100, 120):
         observation, _ = probe.reset(seed=seed)

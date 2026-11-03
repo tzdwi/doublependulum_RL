@@ -3,6 +3,7 @@ Some common tools across the RL algorithms I want to play with
 """
 
 import gymnasium as gym
+import imageio
 import torch
 import random
 from collections import namedtuple, deque
@@ -28,6 +29,7 @@ torch.distributions.Distribution.set_default_validate_args(False)
 this_dir = str(os.path.dirname(os.path.realpath(__file__)))
 plot_dir = str(Path(__file__).parent.parent.parent)+"/scripts/figures"
 vid_dir = str(Path(__file__).parent.parent.parent)+"/scripts/videos"
+HOLDOUT_SEEDS = list(range(100, 120))
 
 def prepare_parallel(learner, num_envs, **kwargs):
     learner.num_envs = int(num_envs)
@@ -102,7 +104,7 @@ def run_parallel(learner, num_episodes, start_episode, choose_actions, on_step, 
         new_episodes = 0
         stop = None
         for index in episode_index:
-            _maybe_record(learner, index, num_episodes)
+            _maybe_record(learner, index)
         while new_episodes < budget and stop is None:
             actions = choose_actions(states)
             action_batch = np.array([[_as_float(action)] for action in actions], dtype=np.float32)
@@ -156,7 +158,7 @@ def run_parallel(learner, num_episodes, start_episode, choose_actions, on_step, 
                     mask[i] = True
                     episode_index[i] = next_index
                     reset_seeds[i] = _shift_training_seed(next_index)
-                    _maybe_record(learner, next_index, num_episodes)
+                    _maybe_record(learner, next_index)
                     next_index += 1
                     step_index[i] = 0
                     returns[i] = 0.0
@@ -169,6 +171,7 @@ def run_parallel(learner, num_episodes, start_episode, choose_actions, on_step, 
                     ).unsqueeze(0)
         if stop:
             print(stop)
+        _record_final(learner)
     finally:
         if bar is not None:
             bar.close()
@@ -176,11 +179,129 @@ def run_parallel(learner, num_episodes, start_episode, choose_actions, on_step, 
         learner.vec = None
 
 
-def _maybe_record(learner, episode_index, num_episodes):
-    if learner.log_env and episode_index > 0 and (
-        (np.log2(episode_index) % 2 == 0) or episode_index == num_episodes - 1
-    ):
-        learner.run_sim(episode_index)
+def _policy_force(learner, state):
+    kwargs = {"do_deterministic": True}
+    # BRO trains the optimistic mean. The video shows that mean, without action noise.
+    if getattr(learner, "video_prefix", "") == "bro":
+        kwargs["do_optimistic"] = True
+    action = learner.select_action(state, **kwargs)
+    if isinstance(action, tuple):
+        action = action[0]
+    return _as_float(action)
+
+
+def _video_env_kwargs(env):
+    plant = env.unwrapped
+    return dict(
+        size=plant.size,
+        max_F=plant.max_F,
+        max_ang_vel=plant.max_ang_vel,
+        mm=plant.mm,
+        m1=plant.m1,
+        l1=plant.l1,
+        m2=plant.m2,
+        l2=plant.l2,
+        dt=plant.dt,
+        theta_tol=plant.theta_tol,
+        action_repeat=plant.action_repeat,
+    )
+
+
+def _video_envs(learner, count):
+    envs = getattr(learner, "_video_envs", None)
+    if envs is None or len(envs) < count:
+        kwargs = _video_env_kwargs(learner.env)
+        envs = [init_env(**kwargs) for _ in range(count)]
+        learner._video_envs = envs
+    return envs[:count]
+
+
+def _as_state(observation):
+    return torch.tensor(observation, dtype=torch.float32, device=device).unsqueeze(0)
+
+
+def _write_decision(writer, learner, envs, states, active, canvas, overlay):
+    """Hold one force and write a frame after every physics step."""
+    running = []
+    for i, env in enumerate(envs):
+        if not active[i]:
+            continue
+        plant = env.unwrapped
+        plant.hold_force(_policy_force(learner, states[i]))
+        running.append((i, plant, []))
+    if not running:
+        return
+    repeat = running[0][1].action_repeat
+    shots = []
+    for _ in range(repeat):
+        shown = []
+        for i, plant, infos in running:
+            if not active[i]:
+                continue
+            infos.append(plant._physics_step())
+            shown.append(plant)
+            if not overlay:
+                shots.append(np.array(plant.pendulum.x, copy=True))
+            if infos[-1]["failure_penalty"]:
+                active[i] = False
+        if not shown:
+            break
+        if overlay:
+            writer.append_data(canvas.render_many(shown))
+        if all(not active[i] for i, _, _ in running):
+            break
+    if overlay:
+        for i, plant, _ in running:
+            if active[i]:
+                states[i] = _as_state(plant._clip_obs(plant._get_obs()))
+        return
+    _, plant, infos = running[0]
+    observation, reward, terminated, _ = plant.decision_from_infos(infos)
+    for shot in shots:
+        plant.pendulum.x[:] = shot
+        plant.state = plant._get_state()
+        writer.append_data(plant.render(log_reward=True, reward=reward))
+    if not terminated and active[0]:
+        states[0] = _as_state(observation)
+
+
+def record_policy_video(learner, seeds, episode_number):
+    """Roll deterministic held-out seeds and save one frame per physics step."""
+    canvas = learner.log_env.unwrapped
+    overlay = len(seeds) > 1
+    if overlay:
+        envs = _video_envs(learner, len(seeds))
+        name = f"{learner.video_prefix}_ep{episode_number}.mp4"
+    else:
+        envs = [learner.log_env]
+        name = f"{learner.video_prefix}_final.mp4"
+    states = []
+    for env, seed in zip(envs, seeds):
+        observation, _ = env.reset(seed=int(seed))
+        states.append(_as_state(observation))
+    active = [True] * len(envs)
+    limit = int(envs[0].spec.max_episode_steps)
+    os.makedirs(vid_dir, exist_ok=True)
+    path = os.path.join(vid_dir, name)
+    # One frame is one integrator step of dt, so playback stays in real time.
+    writer = imageio.get_writer(path, fps=int(round(1.0 / canvas.dt)))
+    try:
+        decisions = 0
+        while any(active) and decisions < limit:
+            _write_decision(writer, learner, envs, states, active, canvas, overlay)
+            decisions += 1
+    finally:
+        writer.close()
+
+
+def _maybe_record(learner, episode_index):
+    if learner.log_env and episode_index > 0 and episode_index % 250 == 0:
+        record_policy_video(learner, HOLDOUT_SEEDS, episode_index)
+
+
+def _record_final(learner):
+    if learner.log_env:
+        record_policy_video(learner, [HOLDOUT_SEEDS[0]], None)
 
 
 def init_env(size=50, max_F=25.0, max_ang_vel=4*np.pi, mm=5.0, m1=0.5, l1=10.0, m2=0.5, l2=10.0, dt=0.03, theta_tol=np.pi/10, action_repeat=3, render_mode=None):

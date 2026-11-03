@@ -16,10 +16,8 @@ import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
 
-from .nn_common import this_dir, plot_dir, vid_dir, init_env, device, Transition, ReplayMemory, warmup_action, EarlyStop, polyak_update, prepare_parallel, run_parallel, LQR_OBS_CENTER, LQR_OBS_SPREAD
+from .nn_common import this_dir, plot_dir, init_env, device, Transition, ReplayMemory, warmup_action, EarlyStop, polyak_update, prepare_parallel, run_parallel, LQR_OBS_CENTER, LQR_OBS_SPREAD, _maybe_record, _record_final, _shift_training_seed
 from .sac import SAC_Q_DP
-
-import imageio
 
 SAC_G_velocity_pickle = this_dir+"/pickles/sac_flowg_velocity_net.pt"
 SAC_G_Q1_pickle = this_dir+"/pickles/sac_flowg_q1_net.pt"
@@ -192,6 +190,7 @@ class SAC_FLOWG_Learner:
 	
 		self.log_progress=log_progress
 		self.log_env=None
+		self.video_prefix = "sac_flowg"
 		if self.log_progress:
 			self.log_env = init_env(size=size,
 							max_F=max_F,
@@ -377,24 +376,6 @@ class SAC_FLOWG_Learner:
 		alpha_loss.backward()
 		self.alpha_optimizer.step()
 
-	def run_sim(self, episode_number):
-		frames = []
-		state, info = self.log_env.reset(seed=episode_number)
-		state = torch.tensor(state, dtype=torch.float32, device=device).unsqueeze(0)
-		done = False
-		while not done:
-			# select action based on observed state
-			action, _ = self.select_action(state, do_deterministic=True)
-			# take step in environment to get next state, reward, and termination/truncation signals
-			observation, reward, terminated, truncated, _ = self.log_env.step(action.item())
-			# HxWx3
-			frame = self.log_env.unwrapped.render(log_reward=True,reward=reward)
-			frames.append(frame)
-			# done signal is either terminated or truncated
-			done = terminated or truncated
-			state = torch.tensor(observation, dtype=torch.float32, device=device).unsqueeze(0)
-		imageio.mimsave(vid_dir+f"/sac_flowg_ep{episode_number}.mp4", frames, fps=self.log_env.metadata["render_fps"])
-
 	def _actor_started(self):
 		return self.steps_done > self.start_steps + self.actor_holdback
 
@@ -427,12 +408,10 @@ class SAC_FLOWG_Learner:
 		early = EarlyStop()
 		stop = None
 		for i_episode in iterator:
-			if i_episode > 0:
-				if self.log_env and ((np.log2(i_episode) % 2 == 0) or (i_episode==num_episodes-1)):
-					self.run_sim(i_episode)
+			_maybe_record(self, i_episode)
 			cumulative_reward = 0
 			# Initialize the environment and get its state
-			state, info = self.env.reset(seed=i_episode)
+			state, info = self.env.reset(seed=_shift_training_seed(i_episode))
 			state = torch.tensor(state, dtype=torch.float32, device=device).unsqueeze(0)
 			for t in count():
 				# select action based on observed state
@@ -490,6 +469,7 @@ class SAC_FLOWG_Learner:
 			if stop:
 				print(stop)
 				break
+		_record_final(self)
 		if make_plots:
 			fig = plt.figure(dpi=300)
 			plt.plot(np.arange(len(self.episode_durations)), self.episode_durations)

@@ -147,19 +147,14 @@ class DoublePendulumEnv(gym.Env):
 
         return self._clip_obs(observation), info
 
-    def step(self, action):
-        # Update current force, clipped to current boundaries.
+    def hold_force(self, action):
         # The action space is a length-1 box, so a vector step sends shape (1,).
         force = float(np.reshape(action, -1)[0])
         self._agent_location = float(np.clip(force, -self.max_F, self.max_F))
-        # Hold the force for action_repeat physics steps. The balance score is averaged so each
-        # decision is about 1 while upright. A fall ends the episode; the five-second success
-        # flag is recorded and does not end it.
-        infos = []
-        for _ in range(self.action_repeat):
-            infos.append(self._physics_step())
-            if infos[-1]["failure_penalty"]:
-                break
+
+    def decision_from_infos(self, infos):
+        # The balance score is averaged so each decision is about 1 while upright.
+        # A fall ends the episode; the five-second success flag is recorded and does not end it.
         shaping = ["control_penalty", "balance_reward", "tilt_rate", "speed_penalty"]
         events = ["failure_penalty", "offtrack_penalty"]
         info = {key: float(np.mean([i[key] for i in infos])) for key in shaping}
@@ -173,11 +168,22 @@ class DoublePendulumEnv(gym.Env):
             - info["tilt_rate"]
             - info["speed_penalty"]
         )
+        return self._clip_obs(self._get_obs()), reward, terminated, info
+
+    def step(self, action):
+        # Hold the force for action_repeat physics steps.
+        self.hold_force(action)
+        infos = []
+        for _ in range(self.action_repeat):
+            infos.append(self._physics_step())
+            if infos[-1]["failure_penalty"]:
+                break
+        observation, reward, terminated, info = self.decision_from_infos(infos)
 
         if self.render_mode == "human":
             self.render()
 
-        return self._clip_obs(self._get_obs()), reward, terminated, False, info
+        return observation, reward, terminated, False, info
 
     def _physics_step(self):
         # Apply the current force to the pendulum for one physics step
@@ -380,6 +386,67 @@ class DoublePendulumEnv(gym.Env):
             return np.transpose(
                 np.array(pygame.surfarray.pixels3d(self.screen)), axes=(1, 0, 2)
             )
+
+    def render_many(self, plants, alpha=80):
+        """Draw the track once and each plant's cart and poles on the same frame."""
+        try:
+            import pygame
+        except ImportError as e:
+            raise DependencyNotInstalled(
+                'pygame is not installed, run `pip install "gymnasium[classic-control]"`'
+            ) from e
+        if self.screen is None:
+            pygame.display.init()
+            self.screen = pygame.Surface((self.SCREEN_DIM, self.SCREEN_DIM))
+
+        bound = self.l1 + self.l2 + 0.2 + self.size
+        scale = self.SCREEN_DIM / (bound * 2)
+        offset = self.SCREEN_DIM / 2
+
+        def blank():
+            surf = pygame.Surface((self.SCREEN_DIM, self.SCREEN_DIM))
+            surf.fill((255, 255, 255))
+            return surf
+
+        def pixels(surf):
+            return np.flipud(np.transpose(np.array(pygame.surfarray.pixels3d(surf)), axes=(1, 0, 2)))
+
+        def draw_body(surf, plant):
+            cartesian = plant.pendulum.transform_cartesian()
+            p0 = (cartesian[0] * scale + offset, offset)
+            p1 = (cartesian[1][0] * scale + offset, cartesian[1][1] * scale + offset)
+            p2 = (cartesian[2][0] * scale + offset, cartesian[2][1] * scale + offset)
+            pygame.draw.line(surf, (0, 0, 0), p0, p1)
+            pygame.draw.line(surf, (0, 0, 0), p1, p2)
+            cart_size = 0.05 * self.size * scale
+            ball_size = max(1, int(0.025 * self.size * scale))
+            corners = [
+                (p0[0] - cart_size, p0[1] - cart_size),
+                (p0[0] - cart_size, p0[1] + cart_size),
+                (p0[0] + cart_size, p0[1] + cart_size),
+                (p0[0] + cart_size, p0[1] - cart_size),
+            ]
+            pygame.draw.polygon(surf, (0, 0, 0), corners)
+            pygame.draw.polygon(surf, (204, 0, 0), corners, 1)
+            for point in (p1, p2):
+                pygame.draw.circle(surf, (204, 204, 0), (int(point[0]), int(point[1])), ball_size)
+
+        base = blank()
+        pygame.draw.line(
+            base,
+            (0, 0, 0),
+            (-self.size * scale + offset, offset),
+            (self.size * scale + offset, offset),
+        )
+        acc = pixels(base).astype(np.float32)
+        blend = alpha / 255.0
+        for plant in plants:
+            layer = blank()
+            draw_body(layer, plant)
+            image = pixels(layer).astype(np.float32)
+            mask = np.any(image < 250, axis=-1, keepdims=True)
+            acc = np.where(mask, acc * (1.0 - blend) + image * blend, acc)
+        return acc.astype(np.uint8)
 
     def close(self):
         if self.screen is not None:
