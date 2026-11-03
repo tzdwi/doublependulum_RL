@@ -3601,7 +3601,9 @@ class ProtectedReplay:
     def sample(self, batch_size):
         half = batch_size // 2
         if len(self._protected) < half:
+            self.archive_in_last_sample = 0
             return random.sample(self.memory, batch_size)
+        self.archive_in_last_sample = half
         return random.sample(self._protected, half) + random.sample(self.memory, batch_size - half)
 
     def __len__(self):
@@ -3612,7 +3614,8 @@ class ProtectedReplay:
         return len(self._protected)
 
 
-def speed_penalty_run(env, gain, protected=False, adam_betas=None):
+def speed_penalty_run(env, gain, protected=False, adam_betas=None, archive_bc=False, alpha=None,
+                      freeze_alpha=True):
     observations = []
     for seed in range(20):
         observation, _ = env.reset(seed=seed)
@@ -3628,22 +3631,29 @@ def speed_penalty_run(env, gain, protected=False, adam_betas=None):
     print("observation spread " + " ".join(f"{value:.6f}" for value in spread.tolist()), flush=True)
     _reseed(0)
     library_outcome.best = None
-    if protected and adam_betas is not None:
+    if protected and archive_bc:
+        label = "protected bc"
+    elif protected and adam_betas is not None:
         label = "protected tuned adam"
     elif protected:
         label = "protected replay"
     elif adam_betas is not None:
         label = "tuned adam"
+    elif not freeze_alpha:
+        label = "learnable alpha 2M"
     else:
-        label = "speed penalty 2M"
+        label = "steep speed 2M"
     learner = SAC_Learner(
         obs_center=center,
         obs_spread=spread,
         reward_scale=100.0,
-        freeze_alpha=True,
+        freeze_alpha=freeze_alpha,
         buffer_length=1_800_000 if protected else 2_000_000,
         adam_betas=adam_betas if adam_betas is not None else (0.9, 0.999),
+        archive_bc=bool(protected and archive_bc),
+        **({} if alpha is None else {"alpha": alpha}),
     )
+    print(f"entropy weight {learner.log_alpha.exp().item():.6f}", flush=True)
     if adam_betas is not None:
         print(
             f"adam betas {learner.Q_optimizer.defaults['betas'][0]} "
@@ -3654,6 +3664,8 @@ def speed_penalty_run(env, gain, protected=False, adam_betas=None):
     if protected:
         learner.memory = ProtectedReplay(1_800_000, 200_000)
         print("protected archive 200000 fifo 1800000", flush=True)
+        if archive_bc:
+            print("archive bc on", flush=True)
     learner.dump_best = lambda *args, **kwargs: None
     original_reset = learner.env.reset
 

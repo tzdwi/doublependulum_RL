@@ -15,7 +15,7 @@ import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
 
-from .nn_common import this_dir, plot_dir, vid_dir, init_env, device, Transition, ReplayMemory, warmup_action, EarlyStop, polyak_update, prepare_parallel, run_parallel
+from .nn_common import this_dir, plot_dir, vid_dir, init_env, device, Transition, ReplayMemory, warmup_action, EarlyStop, polyak_update, prepare_parallel, run_parallel, LQR_OBS_CENTER, LQR_OBS_SPREAD
 
 import imageio
 
@@ -94,6 +94,8 @@ class DDPG_Learner:
                  start_steps=2000,
                  buffer_length=1e6,
                  log_progress=False,
+                 obs_center=LQR_OBS_CENTER,
+                 obs_spread=LQR_OBS_SPREAD,
                  num_envs=1):
 
         self.env = init_env(size=size,
@@ -133,6 +135,8 @@ class DDPG_Learner:
         self.GAMMA = gamma
         self.TAU = tau
         self.LR = learning_rate
+        self.obs_center = None if obs_center is None else torch.as_tensor(obs_center, dtype=torch.float32, device=device)
+        self.obs_spread = None if obs_spread is None else torch.as_tensor(obs_spread, dtype=torch.float32, device=device)
         
         # Get the number of state observations
         state, info = self.env.reset()
@@ -170,6 +174,11 @@ class DDPG_Learner:
                          size=size, max_F=max_F, max_ang_vel=max_ang_vel,
                          mm=mm, m1=m1, l1=l1, m2=m2, l2=l2, dt=dt, theta_tol=theta_tol)
 
+    def _condition(self, state):
+        if self.obs_center is None:
+            return state
+        return (state - self.obs_center) / self.obs_spread
+
     def select_action(self, state, do_deterministic=False):
         """
         We deterministically pick an action and add on decaying white noise.
@@ -181,7 +190,7 @@ class DDPG_Learner:
             action = torch.as_tensor(warmup_action(self.env.action_space), device=device, dtype=torch.float32).view(1, 1)
         else:
             with torch.no_grad():
-                action = self.policy_net(state)
+                action = self.policy_net(self._condition(state))
                 if not do_deterministic:
                     steps_elapsed = self.steps_done-self.start_steps
                     scale = float(self.env.action_space.high[0])
@@ -209,9 +218,9 @@ class DDPG_Learner:
         if not non_final_mask.any():
             non_final_next_states = torch.tensor([])
         else:
-            non_final_next_states = torch.cat([s for s in batch.next_state
-                                                    if s is not None])
-        state_batch = torch.cat(batch.state)
+            non_final_next_states = self._condition(torch.cat([s for s in batch.next_state
+                                                                if s is not None]))
+        state_batch = self._condition(torch.cat(batch.state))
         action_batch = torch.cat(batch.action)
         reward_batch = torch.cat(batch.reward)
 

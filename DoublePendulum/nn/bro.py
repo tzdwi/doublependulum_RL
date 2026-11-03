@@ -20,7 +20,7 @@ import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
 
-from .nn_common import this_dir, plot_dir, vid_dir, init_env, device, Transition, ReplayMemory, warmup_action, EarlyStop, polyak_update, prepare_parallel, run_parallel
+from .nn_common import this_dir, plot_dir, vid_dir, init_env, device, Transition, ReplayMemory, warmup_action, EarlyStop, polyak_update, prepare_parallel, run_parallel, LQR_OBS_CENTER, LQR_OBS_SPREAD
 
 import imageio
 
@@ -118,6 +118,8 @@ class BRO_Learner:
                  actor_holdback=20000,
                  reset_holdback=2000,
                  log_progress=False,
+                 obs_center=LQR_OBS_CENTER,
+                 obs_spread=LQR_OBS_SPREAD,
                  num_envs=1):
 
         self.env = init_env(size=size,
@@ -165,6 +167,8 @@ class BRO_Learner:
         self.KL_TARGET = KL_target
         self.POLYAK = polyak
         self.PESSIMISM = pessimism
+        self.obs_center = None if obs_center is None else torch.as_tensor(obs_center, dtype=torch.float32, device=device)
+        self.obs_spread = None if obs_spread is None else torch.as_tensor(obs_spread, dtype=torch.float32, device=device)
         
         # Get the number of state observations
         state, info = self.env.reset()
@@ -267,6 +271,11 @@ class BRO_Learner:
             nets = [self.Q_net_1, self.Q_net_2]
         return [net(Q_in) for net in nets]
 
+    def _condition(self, state):
+        if self.obs_center is None:
+            return state
+        return (state - self.obs_center) / self.obs_spread
+
     def select_action(self, state, do_optimistic=False, do_deterministic=False):
         """
         We sample an action from the policy.
@@ -278,6 +287,7 @@ class BRO_Learner:
             action = torch.as_tensor(warmup_action(self.env.action_space), device=device, dtype=torch.float32).view(1, 1)
         else:
             with torch.no_grad():
+                state = self._condition(state)
                 action_mu, action_logsig = self.pessimistic_net(state).chunk(2, dim=-1)
                 if do_optimistic:
                     x = torch.cat((state, action_mu), dim=-1)
@@ -306,7 +316,7 @@ class BRO_Learner:
         # detailed explanation). This converts batch-array of Transitions
         # to Transition of batch-arrays.
         batch = Transition(*zip(*transitions))
-        state_batch = torch.cat(batch.state)
+        state_batch = self._condition(torch.cat(batch.state))
         action_batch = torch.cat(batch.action)
         reward_batch = torch.cat(batch.reward)
         # Compute a mask of non-final states and concatenate the batch elements
@@ -316,9 +326,9 @@ class BRO_Learner:
         if not non_final_mask.any():
             non_final_next_states = torch.tensor([])
         else:
-            non_final_next_states = torch.cat([s for s in batch.next_state
-                                                    if s is not None])
-        state_batch = torch.cat(batch.state)
+            non_final_next_states = self._condition(torch.cat([s for s in batch.next_state
+                                                                if s is not None]))
+        state_batch = self._condition(torch.cat(batch.state))
         action_batch = torch.cat(batch.action)
         reward_batch = torch.cat(batch.reward)
 

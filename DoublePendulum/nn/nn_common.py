@@ -12,6 +12,15 @@ from pathlib import Path
 
 from .. import max_seconds
 
+LQR_OBS_CENTER = np.array(
+    [-0.003775, -0.000005, -0.000004, -0.000054, -0.000008, -0.000008, 0.000013],
+    dtype=np.float32,
+)
+LQR_OBS_SPREAD = np.array(
+    [0.046247, 0.004228, 0.003751, 0.049730, 0.000835, 0.000408, 0.017284],
+    dtype=np.float32,
+)
+
 # Distribution checks synchronize the GPU on every sample. The policy already
 # clamps its standard deviation, so skip the checks during training.
 torch.distributions.Distribution.set_default_validate_args(False)

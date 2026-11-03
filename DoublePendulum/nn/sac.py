@@ -15,7 +15,7 @@ import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
 
-from .nn_common import this_dir, plot_dir, vid_dir, init_env, device, Transition, ReplayMemory, warmup_action, EarlyStop, polyak_update, prepare_parallel, run_parallel
+from .nn_common import this_dir, plot_dir, vid_dir, init_env, device, Transition, ReplayMemory, warmup_action, EarlyStop, polyak_update, prepare_parallel, run_parallel, LQR_OBS_CENTER, LQR_OBS_SPREAD
 
 import imageio
 
@@ -93,19 +93,20 @@ class SAC_Learner:
                  batch_size=128,
                  gamma=0.99,
                  tau=0.995,
-                 alpha=0.01,
+                 alpha=0.03,
                  learning_rate=3e-4,
                  policy_delay=2,
                  actor_holdback=20000,
                  start_steps=2000,
                  buffer_length=1e6,
                  log_progress=False,
-                 obs_center=None,
-                 obs_spread=None,
+                 obs_center=LQR_OBS_CENTER,
+                 obs_spread=LQR_OBS_SPREAD,
                  reward_scale=1.0,
                  freeze_alpha=False,
                  adam_betas=(0.9, 0.999),
-                 num_envs=1):
+                 num_envs=1,
+                 archive_bc=False):
 
         self.env = init_env(size=size,
                             max_F=max_F,
@@ -152,11 +153,11 @@ class SAC_Learner:
         n_observations = len(state)
         self.scale = float(self.env.action_space.high[0])
         self.reward_scale = reward_scale
-        self.obs_center = obs_center
-        self.obs_spread = obs_spread
+        self.obs_center = None if obs_center is None else torch.as_tensor(obs_center, dtype=torch.float32, device=device)
+        self.obs_spread = None if obs_spread is None else torch.as_tensor(obs_spread, dtype=torch.float32, device=device)
         self.freeze_alpha = freeze_alpha
 
-        self.log_alpha = torch.tensor(math.log(alpha / reward_scale), device=device, requires_grad=True)
+        self.log_alpha = torch.tensor(math.log(alpha), device=device, requires_grad=True)
         self.alpha_optimizer = optim.Adam([self.log_alpha], lr=self.LR)
         # -dim(A) in [-1, 1] action units; logprobs here are in force units, hence the log(scale) shift.
         self.target_entropy = math.log(self.scale) - 1.0
@@ -190,6 +191,8 @@ class SAC_Learner:
         self.cumulative_rewards = []
         self.final_state_balanced = []
         self.final_state_truncated = []
+        self.archive_bc = archive_bc
+        self.bc_coef = None
         prepare_parallel(self, num_envs,
                          size=size, max_F=max_F, max_ang_vel=max_ang_vel,
                          mm=mm, m1=m1, l1=l1, m2=m2, l2=l2, dt=dt, theta_tol=theta_tol)
@@ -306,6 +309,21 @@ class SAC_Learner:
         selected = torch.min(Qs, dim=-1).values
         # we want gradient _ascent_ so we use the negative of the sum of action values
         loss = -(selected-self.log_alpha.exp().detach()*logprobs).sum()/self.BATCH_SIZE
+        if self.archive_bc:
+            archive_n = getattr(self.memory, "archive_in_last_sample", 0)
+            if archive_n:
+                stored = action_batch[:archive_n]
+                bc_loss = -self._squashed_log_prob(state_batch[:archive_n], stored).mean()
+                if self.bc_coef is None:
+                    actor_norm = self._policy_grad_norm(loss)
+                    bc_norm = self._policy_grad_norm(bc_loss)
+                    self.bc_coef = float(actor_norm / bc_norm) if bc_norm > 0 else 0.0
+                    print(
+                        f"archive bc scale {self.bc_coef:.6g} "
+                        f"actor grad {float(actor_norm):.6g} bc grad {float(bc_norm):.6g}",
+                        flush=True,
+                    )
+                loss = loss + self.bc_coef * bc_loss
         self.policy_optimizer.zero_grad()
         loss.backward()
         # In-place gradient clipping
@@ -318,6 +336,25 @@ class SAC_Learner:
         self.alpha_optimizer.zero_grad()
         alpha_loss.backward()
         self.alpha_optimizer.step()
+
+    def _squashed_log_prob(self, states, forces):
+        action_mu, action_logsig = self.policy_net(states).chunk(2, dim=-1)
+        action_logsig = action_logsig.clamp(-20, 2)
+        squashed = (forces / self.scale).clamp(-1 + 1e-6, 1 - 1e-6)
+        u = 0.5 * torch.log((1 + squashed) / (1 - squashed))
+        dist = torch.distributions.Normal(action_mu, torch.exp(action_logsig))
+        log_prob = dist.log_prob(u) - torch.log(1.0 - squashed.pow(2) + 1e-12) - math.log(self.scale)
+        return log_prob.squeeze(-1)
+
+    def _policy_grad_norm(self, loss):
+        grads = torch.autograd.grad(
+            loss, self.policy_net.parameters(), retain_graph=True, allow_unused=True
+        )
+        total = loss.new_zeros(())
+        for grad in grads:
+            if grad is not None:
+                total = total + grad.detach().pow(2).sum()
+        return total.sqrt()
 
     def run_sim(self, episode_number):
         frames = []

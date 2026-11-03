@@ -204,7 +204,7 @@ class DoublePendulumEnv(gym.Env):
         # This is continuous in both speed and angle, and capped below the balance reward.
         max_speed = max(abs(cartesian[3]), math.hypot(*cartesian[4]), math.hypot(*cartesian[5]))
         speed_excess = max(0.0, max_speed / self._still_speed - 1.0)
-        speed_penalty = 0.5 * speed_excess / (speed_excess + 50.0)
+        speed_penalty = 0.5 * speed_excess / (speed_excess + 5.0)
         # Marks a fall for termination. The return itself is the balance score that stops arriving.
         failure_penalty = 0.0 if self._head_is_up(cartesian) else 1.0
         offtrack_penalty = 1.0 if offtrack else 0.0
