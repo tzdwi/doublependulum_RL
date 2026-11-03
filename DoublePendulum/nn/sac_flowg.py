@@ -1,5 +1,6 @@
 """
 We're going to be training a Soft Actor-Critic with an GRN component
+https://arxiv.org/pdf/2509.25756
 """
 import math
 import os
@@ -85,7 +86,7 @@ class SAC_FLOWG_VELOCITY(nn.Module):
 		self.gate_layer1 = nn.Linear(n_observations+n_actions+t_emb_dim, d_hid)
 		self.gate_layer2 = nn.Linear(d_hid, n_actions)
 		nn.init.zeros_(self.gate_layer2.weight)
-		self.gate_layer2.bias.data[:] = 5.0
+		self.gate_layer2.bias.data[:] = 1.0
 
 		self.layer1 = nn.Linear(n_observations+n_actions+t_emb_dim, d_hid)
 		self.layer2 = nn.Linear(d_hid, n_actions)
@@ -93,7 +94,8 @@ class SAC_FLOWG_VELOCITY(nn.Module):
 		self.std_layer1 = nn.Linear(n_observations, d_hid)
 		self.std_layer2 = nn.Linear(d_hid, n_actions)
 		nn.init.zeros_(self.std_layer2.weight)
-		self.std_layer2.bias.data[:] = 0.0
+		# -1.5 + 3.5*tanh(bias) = log(0.1).
+		self.std_layer2.bias.data[:] = math.atanh((math.log(0.1) + 1.5) / 3.5)
 		
 		self.activation = nn.SiLU()
 		self.sigmoid = nn.Sigmoid()
@@ -118,15 +120,27 @@ class SAC_FLOWG_VELOCITY(nn.Module):
 		else:
 			A = torch.randn(state.shape[0], 1, device=state.device)
 		logp = torch.distributions.Normal(0, 1).log_prob(A).sum(-1)
+		dt = 1.0 / K
 		time_tens = torch.ones(state.shape[0], dtype=torch.float32, device=device)
 		for i in range(K):
 			time = i*time_tens/K
 			v, log_std = self.forward(state, A, time)
-			mean = A + v / K # dt = 1/K
 			if do_deterministic:
-				A = mean; continue
+				A = A + v * dt
+				continue
+			# Noise-augmented rollout, Appendix A.1: drift-correct v so the
+			# injected per-step noise leaves the deterministic path's final
+			# action marginal unchanged (b_theta(0,.,.) = v_theta(0,.,.)).
+			t = time.unsqueeze(-1)
+			remaining = (1.0 - t).clamp(min=1e-3)
 			log_std = log_std.clamp(-20, 2)
-			std = log_std.exp()
+			sigma = log_std.exp()
+			drift = (1.0 + t * sigma.pow(2) / (2.0 * remaining)) * v - (sigma.pow(2) / (2.0 * remaining)) * A
+			# Appendix A separately defines the t=0 value, where the displayed
+			# t/t contraction term is undefined, as b_theta(0,.,.) = v_theta.
+			drift = torch.where(t == 0.0, v, drift)
+			mean = A + drift * dt
+			std = sigma * math.sqrt(dt)
 			A = mean + std * torch.randn_like(mean)
 			logp = logp + torch.distributions.Normal(mean, std).log_prob(A).sum(-1)
 		y = torch.tanh(A)

@@ -1,3 +1,30 @@
+"""Diagnostic experiments for the double-pendulum learners.
+
+This is not a training script. ``main`` checks the plant, the discrete LQR
+reference, and the small critic fits. Every later experiment is a function in
+this file and is launched by calling that function directly.
+
+Seeds at or above 100 are shifted up by 20 in the long training loops, leaving
+100-119 for held-out scoring. Those runs also disable checkpoint saves. Replay
+keeps the environment's raw observations; a learner applies its center and
+spread only when it reads a state.
+
+The experiments fall into four groups:
+
+* Plant and reward: ``main``, ``rank_actions``, ``force_grid``.
+* Critics: ``critic_fit``, ``critic_td``, ``critic_td_stored``,
+  ``warmup_mixtures``.
+* Actors fit to a known force or return: ``clone_lqr``,
+  ``adam_linear_budget``, ``adam_normalized``, ``adam_normalized_full``,
+  ``actor_normalized_full``, ``return_critic_actor``, ``paired_return_actor``,
+  ``oracle_grid_actor``, ``actor_update_scale``, ``warmup_q_coverage``,
+  ``sac_prefix_ablation``, ``return_teacher``.
+* Live training and replay: ``reset_action_contrast``, ``bellman_equivalence``,
+  ``behavior_backup_audit``, ``scaled_sac``, ``frozen_replay_split``,
+  ``replay_swap``, ``failure_tests``, ``library_outcome``,
+  ``speed_penalty_run``, ``ddpg_scaled_run``.
+"""
+
 import copy
 import random
 import sys
@@ -22,7 +49,11 @@ TERMS = [
 ]
 
 
+# Plant, reward terms, and the discrete LQR reference used by the later probes.
+
+
 def rollout(env, seed, policy):
+    """Roll one episode and total each reward term."""
     env.reset(seed=seed)
     totals = {key: 0.0 for key in TERMS}
     reward_sum = 0.0
@@ -63,6 +94,7 @@ def one_decision(plant, state, force):
 
 
 def discrete_lqr(plant):
+    """Fit a gentle discrete LQR gain about the upright state."""
     upright = np.array([0.0, np.pi, np.pi, 0.0, 0.0, 0.0])
     state_step = 1e-4
     force_step = 1e-2
@@ -162,6 +194,7 @@ def tilted_states():
 
 
 def rank_actions(env, gain, states, label):
+    """Compare discounted returns of the LQR force, its opposite, and zero force."""
     print(f"reward ranking on {len(states)} {label}")
     if not states:
         return
@@ -216,6 +249,7 @@ def rank_actions(env, gain, states, label):
 
 
 def force_grid(env, gain):
+    """Score a force grid from a two-degree lean, then continue with LQR."""
     tilt = np.deg2rad(2.0)
     state = np.array([0.0, np.pi + tilt, np.pi - tilt, 0.0, 0.0, 0.0])
     print("force grid on a 2 degree opposite lean, then LQR")
@@ -248,7 +282,11 @@ def force_grid(env, gain):
         )
 
 
+# Frozen-return and TD checks for the SAC critic.
+
+
 def critic_fit(env, gain):
+    """Fit fresh critics to Monte Carlo returns and test their action ranking."""
     tilt = np.deg2rad(2.0)
     physical = [
         np.array([0.0, np.pi + tilt, np.pi - tilt, 0.0, 0.0, 0.0]),
@@ -321,6 +359,7 @@ def trajectory(env, state, first_force, gain):
 
 
 def critic_td(env, gain):
+    """Run SAC critic updates on a small frozen set of transitions."""
     tilt = np.deg2rad(2.0)
     physical = [
         np.array([0.0, np.pi + tilt, np.pi - tilt, 0.0, 0.0, 0.0]),
@@ -415,6 +454,7 @@ def stored_action_update(learner, states, actions, reward_span, boot_states, boo
 
 
 def critic_td_stored(env, gain, opening_only=False):
+    """Repeat the TD check using the action that was actually stored."""
     tilt = np.deg2rad(2.0)
     physical = [
         np.array([0.0, np.pi + tilt, np.pi - tilt, 0.0, 0.0, 0.0]),
@@ -985,6 +1025,7 @@ def _stored_next_update(learner, rows, next_actions):
 
 
 def warmup_mixtures(env, gain, stored_backup=False):
+    """Update a critic on mixtures of warmup, LQR, and falling transitions."""
     # 2,000 warmup actions, then 20,000 steps from the frozen initial policy.
     # Critic updates match the pre-actor phase: one normal SAC update per step, no actor.
     pre_actor = 22000
@@ -1162,7 +1203,11 @@ def warmup_mixtures(env, gain, stored_backup=False):
     run("paired", behavior + lqr_rows + inverse_rows + opposite_rows, paired_sample)
 
 
+# Fits that ask whether an actor can represent the LQR force.
+
+
 def clone_lqr(env, gain):
+    """Fit linear and SAC actors to forces recorded from the LQR policy."""
     scale = float(env.action_space.high[0])
 
     def trace(seeds):
@@ -1371,6 +1416,7 @@ def clone_lqr(env, gain):
 
 
 def adam_linear_budget(env, gain):
+    """Measure how many Adam steps an unsquashed linear actor needs to match LQR."""
     scale = float(env.action_space.high[0])
     observations, forces, first = [], [], []
     for seed in range(20):
@@ -1518,6 +1564,7 @@ def adam_linear_budget(env, gain):
 
 
 def adam_normalized(env, gain):
+    """Fit the same linear actor after centering and scaling its inputs."""
     scale = float(env.action_space.high[0])
     observations, forces = [], []
     for seed in range(20):
@@ -1609,6 +1656,7 @@ def adam_normalized(env, gain):
 
 
 def adam_normalized_full(env, gain):
+    """Repeat the normalized linear fit on full LQR episodes."""
     scale = float(env.action_space.high[0])
     observations, forces, first = [], [], []
     for seed in range(20):
@@ -1730,6 +1778,7 @@ def adam_normalized_full(env, gain):
 
 
 def actor_normalized_full(env, gain):
+    """Fit the SAC actor to full-episode LQR forces with normalized inputs."""
     scale = float(env.action_space.high[0])
     observations, forces = [], []
     for seed in range(20):
@@ -1833,6 +1882,7 @@ def actor_normalized_full(env, gain):
 
 
 def return_critic_actor(env, gain):
+    """Fit critics to sampled returns, then ascend an actor on those critics."""
     scale = float(env.action_space.high[0])
     gamma = 0.99
 
@@ -2134,6 +2184,7 @@ def _fork_map(func, argument_sets, workers=16, message="labeled seed"):
 
 
 def paired_return_actor(env, gain):
+    """Train an actor on paired returns from the same states."""
     scale = float(env.action_space.high[0])
     train_jobs = [(seed, gain) for seed in range(20)]
     train_rows = _fork_map(_paired_labels, train_jobs)
@@ -2314,6 +2365,7 @@ def paired_return_actor(env, gain):
 
 
 def oracle_grid_actor(env, gain):
+    """Train an actor against a grid of oracle returns."""
     scale = float(env.action_space.high[0])
     train_rows = _fork_map(_paired_labels, [(seed, gain) for seed in range(20)])
     all_obs = np.vstack([row[0] for row in train_rows])
@@ -2508,6 +2560,7 @@ def _actor_only(learner):
 
 
 def actor_update_scale(env, gain):
+    """Measure the SAC actor step after the critic has trained on warmup data."""
     _reseed(0)
     collector = SAC_Learner()
     rows = []
@@ -2614,6 +2667,7 @@ def actor_update_scale(env, gain):
 
 
 def warmup_q_coverage(env, gain):
+    """Check whether warmup replay covers corrective actions before the actor starts."""
     _reseed(0)
     collector = SAC_Learner()
     rows = []
@@ -2730,6 +2784,7 @@ def _warmup_scale(env, seed):
 
 
 def sac_prefix_ablation(env, gain):
+    """Train SAC on a short prefix and record when its behavior changes."""
     import math
     probe = init_env()
     checkpoints = {2000, 4000, 8000, 12000, 22000, 24000}
@@ -2883,6 +2938,7 @@ def sac_prefix_ablation(env, gain):
 
 
 def reset_action_contrast(env):
+    """Compare one opening force followed by LQR from identical resets."""
     _reseed(0)
     collector = SAC_Learner()
     forces = []
@@ -2986,6 +3042,7 @@ def _bellman_labels(seed, gain):
 
 
 def bellman_equivalence(env, gain):
+    """Compare one-step Bellman targets with the discounted continuation."""
     rows = _fork_map(_bellman_labels, [(seed, gain) for seed in range(20)])
     observations = np.vstack([row[0] for row in rows])
     actions = np.vstack([row[1] for row in rows])
@@ -3219,6 +3276,7 @@ def _behavior_chunk(index, weights, scale, probes):
 
 
 def behavior_backup_audit(env, gain):
+    """Audit critic backups on behavior, LQR, and inverse-force transitions."""
     import math
     _reseed(0)
     learner = SAC_Learner()
@@ -3543,7 +3601,11 @@ def _paired_q(learner, observations, forces):
     return torch.min(scores, dim=-1).values.cpu().numpy()
 
 
+# Live learners. The long runs keep seeds 100-119 out of training resets.
+
+
 def scaled_sac(env, gain, freeze_alpha=False):
+    """Train SAC with LQR input scaling and rewards divided by 100."""
     observations = []
     for seed in range(20):
         observation, _ = env.reset(seed=seed)
@@ -3574,6 +3636,7 @@ def scaled_sac(env, gain, freeze_alpha=False):
 
 
 class ProtectedReplay:
+    """FIFO replay plus a separate list of whole successful episodes."""
     def __init__(self, fifo_capacity, protected_capacity):
         from collections import deque
 
@@ -3616,6 +3679,7 @@ class ProtectedReplay:
 
 def speed_penalty_run(env, gain, protected=False, adam_betas=None, archive_bc=False, alpha=None,
                       freeze_alpha=True):
+    """Train scaled SAC for up to 8000 episodes and audit every 100."""
     observations = []
     for seed in range(20):
         observation, _ = env.reset(seed=seed)
@@ -3696,13 +3760,54 @@ def speed_penalty_run(env, gain, protected=False, adam_betas=None, archive_bc=Fa
         torch.cuda.empty_cache()
 
 
-def _polyak(learner):
-    for net, target in ((learner.Q_net_1, learner.Q_target_1), (learner.Q_net_2, learner.Q_target_2)):
-        net_state = net.state_dict()
-        target_state = target.state_dict()
-        for key in net_state:
-            target_state[key] = target_state[key] * learner.TAU + net_state[key] * (1 - learner.TAU)
-        target.load_state_dict(target_state)
+def ddpg_scaled_run(env, gain):
+    """Train DDPG with reward scale 100 and audit its critic slope."""
+    from DoublePendulum.nn.ddpg import DDPG_Learner
+
+    _reseed(0)
+    library_outcome.best = None
+    learner = DDPG_Learner(reward_scale=100.0)
+    print(
+        "observation center " + " ".join(f"{value:.6f}" for value in learner.obs_center.tolist()),
+        flush=True,
+    )
+    print(
+        "observation spread " + " ".join(f"{value:.6f}" for value in learner.obs_spread.tolist()),
+        flush=True,
+    )
+    print(
+        f"reward scale {learner.reward_scale:g} buffer {learner.memory.memory.maxlen}",
+        flush=True,
+    )
+    learner.dump_best = lambda *args, **kwargs: None
+    original_reset = learner.env.reset
+
+    def reset(*args, **kwargs):
+        seed = kwargs.get("seed")
+        if seed is not None and seed >= 100:
+            kwargs["seed"] = seed + 20
+        return original_reset(*args, **kwargs)
+
+    learner.env.reset = reset
+    label = "scaled ddpg"
+    _audited_train(learner, gain, label, 8000, 0, lambda *args: None)
+    successes = learner.final_state_balanced
+    print(
+        f"{label} finished episodes {len(learner.episode_durations)} "
+        f"steps {learner.steps_done} training successes {int(sum(successes))}/{len(successes)}",
+        flush=True,
+    )
+    best = library_outcome.best
+    if best is not None:
+        current = {key: value.detach().cpu().clone() for key, value in learner.policy_net.state_dict().items()}
+        learner.policy_net.load_state_dict(best["policy"])
+        _preserved_rng(lambda: _scaled_audit(
+            f"{label} best", learner, gain, best["episode"], successes, learner.episode_durations,
+        ))
+        learner.policy_net.load_state_dict(current)
+    del learner
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
 
 def _module_state(module):
@@ -3872,6 +3977,7 @@ def _frozen_updates(name, learner, gain, rows, starts, updates):
 
 
 def frozen_replay_split(env, gain):
+    """Continue critic updates on a frozen copy of an earlier replay."""
     from DoublePendulum.nn.nn_common import EarlyStop
 
     observations = []
@@ -3963,6 +4069,7 @@ def _replay_facts(name, captured):
 
 
 def replay_swap(env, gain):
+    """Swap a learner onto another run's replay and continue its updates."""
     from DoublePendulum.nn.nn_common import EarlyStop
 
     observations = []
@@ -4129,6 +4236,7 @@ def _continue_live(captured, gain, label, maxlen, num_episodes):
 
 
 def failure_tests(env, gain):
+    """Run the 1M buffer, then continue it in a 2M buffer."""
     from DoublePendulum.nn.nn_common import EarlyStop
 
     observations = []
@@ -4221,6 +4329,7 @@ def failure_tests(env, gain):
 
 
 def library_outcome(name, builder=None, trace=False, gain=None):
+    """Train SAC, DDPG, CrossQ, or BRO until its solved or stalled rule."""
     from DoublePendulum.nn.bro import BRO_Learner
     from DoublePendulum.nn.crossQ import CrossQ_Learner
     from DoublePendulum.nn.ddpg import DDPG_Learner
@@ -4302,24 +4411,31 @@ def _scaled_audit(name, learner, gain, counted, successes, durations):
     pre_means, pre_stds, force_stds = [], [], []
     upright_fractions, upright_speeds, holds, speed_penalties = [], [], [], []
     values, slopes, toward = [], [], 0
+    scale = float(getattr(learner, "scale", learner.policy_net.scale))
+    gaussian = None
     for seed in range(100, 120):
         observation, _ = probe.reset(seed=seed)
         state = torch.tensor(observation, dtype=torch.float32, device=device).unsqueeze(0)
         with torch.no_grad():
             action = learner.select_action(state, do_deterministic=True)
-            mean, log_std = learner.policy_net(learner._condition(state)).chunk(2, dim=-1)
-            log_std = log_std.clamp(-20, 2)
-            dist = torch.distributions.Normal(mean, log_std.exp())
-            sampled = dist.sample((32,))
-            sampled_force = torch.clamp(
-                learner.scale * torch.tanh(sampled), -learner.scale, learner.scale,
-            )
-        pre_means.append(abs(float(mean)))
-        pre_stds.append(float(log_std.exp()))
-        force_stds.append(float(sampled_force.std(unbiased=False)))
+            policy_out = learner.policy_net(learner._condition(state))
+            if gaussian is None:
+                gaussian = policy_out.shape[-1] == 2
+            if gaussian:
+                mean, log_std = policy_out.chunk(2, dim=-1)
+                log_std = log_std.clamp(-20, 2)
+                dist = torch.distributions.Normal(mean, log_std.exp())
+                sampled = dist.sample((32,))
+                sampled_force = torch.clamp(scale * torch.tanh(sampled), -scale, scale)
+                pre_means.append(abs(float(mean)))
+                pre_stds.append(float(log_std.exp()))
+                force_stds.append(float(sampled_force.std(unbiased=False)))
         force = action.detach().reshape(1, 1).requires_grad_(True)
-        critic_in = torch.cat((learner._condition(state), force / learner.scale), dim=-1)
-        value = torch.minimum(learner.Q_net_1(critic_in), learner.Q_net_2(critic_in)).sum()
+        critic_in = torch.cat((learner._condition(state), force / scale), dim=-1)
+        if hasattr(learner, "Q_net_1"):
+            value = torch.minimum(learner.Q_net_1(critic_in), learner.Q_net_2(critic_in)).sum()
+        else:
+            value = learner.Q_net(critic_in).sum()
         slope = torch.autograd.grad(value, force)[0]
         lqr = _force_from_physics(probe.unwrapped.pendulum.x, gain, limit)
         values.append(float(value.detach()))
@@ -4388,16 +4504,24 @@ def _scaled_audit(name, learner, gain, counted, successes, durations):
     wide = int(np.sum(tilts < 0.1))
     protected_count = getattr(learner.memory, "protected_count", None)
     protected_note = "" if protected_count is None else f"protected {protected_count} "
+    alpha_note = ""
+    if hasattr(learner, "log_alpha"):
+        alpha_note = f"alpha {float(learner.log_alpha.detach().exp()):.6f} "
+    spread_note = ""
+    if gaussian:
+        spread_note = (
+            f"pre-tanh |mean| {np.median(pre_means):.3f} pre-tanh std {np.median(pre_stds):.3f} "
+            f"force std {np.median(force_stds):.3f} "
+        )
     print(
         f"{name} episode {counted} steps {learner.steps_done} "
         f"training successes {int(sum(successes))}/{counted} "
         f"recent median length {np.median(durations[-100:]):.0f} "
-        f"alpha {float(learner.log_alpha.detach().exp()):.6f} "
+        f"{alpha_note}"
         f"holdout {holdout_successes}/20 median length {median_length:.0f} "
         f"stochastic {int(sum(stochastic_successes))}/20 median length {np.median(stochastic_lengths):.0f} "
         f"opening |F| {np.median(openings):.3f} "
-        f"pre-tanh |mean| {np.median(pre_means):.3f} pre-tanh std {np.median(pre_stds):.3f} "
-        f"force std {np.median(force_stds):.3f} "
+        f"{spread_note}"
         f"upright fraction {np.median(upright_fractions):.3f} "
         f"upright speed/limit {np.nanmedian(upright_speeds):.3f} "
         f"speed penalty {np.median(speed_penalties):.3f} "
@@ -4447,6 +4571,7 @@ def _holdout(learner):
 
 
 def return_teacher(env, gain):
+    """Build soft action targets from sampled returns and fit an actor to them."""
     import math
     _reseed(0)
     learner = SAC_Learner()
@@ -4714,6 +4839,7 @@ def _ascend_actor(nets, observations, center, spread, target_scale, scale):
 
 
 def main():
+    """Run the plant check, LQR reference, reward ranking, and small critic fits."""
     env = init_env()
     plant = env.unwrapped
     print(
