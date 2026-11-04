@@ -114,6 +114,7 @@ class CrossQ_Learner:
                  log_progress=False,
                  obs_center=LQR_OBS_CENTER,
                  obs_spread=LQR_OBS_SPREAD,
+                 reward_scale=100.0,
                  num_envs=1):
 
         self.env = init_env(size=size,
@@ -153,6 +154,7 @@ class CrossQ_Learner:
         self.LR = learning_rate
         self.obs_center = None if obs_center is None else torch.as_tensor(obs_center, dtype=torch.float32, device=device)
         self.obs_spread = None if obs_spread is None else torch.as_tensor(obs_spread, dtype=torch.float32, device=device)
+        self.reward_scale = reward_scale
         
         # Get the number of state observations
         state, info = self.env.reset()
@@ -162,8 +164,8 @@ class CrossQ_Learner:
 
         self.log_alpha = torch.tensor(math.log(alpha), device=device, requires_grad=True)
         self.alpha_optimizer = optim.Adam([self.log_alpha], lr=self.LR)
-        # -dim(A) in [-1, 1] action units; logprobs here are in force units, hence the log(scale) shift.
-        self.target_entropy = math.log(self.scale) - 1.0
+        # One nat of randomness in force units.
+        self.target_entropy = -1.0
 
         # Net to predict the next action
         self.policy_net = CQ_POLICY_DP(n_observations).to(device)
@@ -239,7 +241,7 @@ class CrossQ_Learner:
     
         state_batch = self._condition(torch.cat(batch.state))
         action_batch = torch.cat(batch.action)
-        reward_batch = torch.cat(batch.reward)
+        reward_batch = torch.cat(batch.reward) / self.reward_scale
 
         # Compute a mask of non-final states and concatenate the batch elements
         # (a final state would've been the one after which simulation ended)
@@ -353,7 +355,7 @@ class CrossQ_Learner:
             actor_ready = self._actor_started()
             self.optimize_model(do_policy_step=actor_ready and (step_index % self.policy_delay == 0))
 
-    def train(self, progress=False, make_plots=False, num_episodes = None):
+    def train(self, progress=False, make_plots=False, num_episodes = None, start_episode=0):
         if not num_episodes:
             if torch.cuda.is_available() or torch.backends.mps.is_available():
                 num_episodes = 600
@@ -362,12 +364,12 @@ class CrossQ_Learner:
 
         if self.num_envs > 1:
             run_parallel(
-                self, num_episodes, 0,
+                self, num_episodes, start_episode,
                 lambda states: [self.select_action(state) for state in states],
                 self._parallel_update, self._actor_started, progress)
             return
 
-        iterator = range(num_episodes)
+        iterator = range(start_episode, num_episodes)
         if progress:
             iterator = tqdm(iterator)
 

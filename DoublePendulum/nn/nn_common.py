@@ -335,7 +335,7 @@ def warmup_action(action_space):
 class EarlyStop:
     """Stop training once the task is solved, or once episode length stops improving."""
 
-    def __init__(self, window=100, solved_count=95, patience=15000, min_gain=2):
+    def __init__(self, window=100, solved_count=95, patience=10000, min_gain=5):
         self.window = window
         self.solved_count = solved_count
         self.patience = patience

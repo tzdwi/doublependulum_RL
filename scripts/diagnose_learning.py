@@ -22,7 +22,7 @@ The experiments fall into four groups:
 * Live training and replay: ``reset_action_contrast``, ``bellman_equivalence``,
   ``behavior_backup_audit``, ``scaled_sac``, ``frozen_replay_split``,
   ``replay_swap``, ``failure_tests``, ``library_outcome``,
-  ``speed_penalty_run``, ``ddpg_scaled_run``.
+  ``speed_penalty_run``, ``ddpg_scaled_run``, ``crossq_scaled_run``.
 """
 
 import copy
@@ -3755,6 +3755,49 @@ def speed_penalty_run(env, gain, protected=False, adam_betas=None, archive_bc=Fa
         torch.cuda.empty_cache()
 
 
+def crossq_scaled_run(env, gain):
+    """Train CrossQ with reward scale 100 and temperature target -1."""
+    from DoublePendulum.nn.crossQ import CrossQ_Learner
+
+    _reseed(0)
+    library_outcome.best = None
+    learner = CrossQ_Learner(reward_scale=100.0)
+    print(
+        "observation center " + " ".join(f"{value:.6f}" for value in learner.obs_center.tolist()),
+        flush=True,
+    )
+    print(
+        "observation spread " + " ".join(f"{value:.6f}" for value in learner.obs_spread.tolist()),
+        flush=True,
+    )
+    print(
+        f"reward scale {learner.reward_scale:g} buffer {learner.memory.memory.maxlen} "
+        f"entropy weight {learner.log_alpha.exp().item():.6f} "
+        f"target entropy {learner.target_entropy:.3f}",
+        flush=True,
+    )
+    learner.dump_best = lambda *args, **kwargs: None
+    label = "scaled crossq"
+    _audited_train(learner, gain, label, 8000, 0, lambda *args: None)
+    successes = learner.final_state_balanced
+    print(
+        f"{label} finished episodes {len(learner.episode_durations)} "
+        f"steps {learner.steps_done} training successes {int(sum(successes))}/{len(successes)}",
+        flush=True,
+    )
+    best = library_outcome.best
+    if best is not None:
+        current = {key: value.detach().cpu().clone() for key, value in learner.policy_net.state_dict().items()}
+        learner.policy_net.load_state_dict(best["policy"])
+        _preserved_rng(lambda: _scaled_audit(
+            f"{label} best", learner, gain, best["episode"], successes, learner.episode_durations,
+        ))
+        learner.policy_net.load_state_dict(current)
+    del learner
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+
 def ddpg_scaled_run(env, gain):
     """Train DDPG with reward scale 100 and audit its critic slope."""
     from DoublePendulum.nn.ddpg import DDPG_Learner
@@ -4373,11 +4416,17 @@ def _scaled_audit(name, learner, gain, counted, successes, durations):
                 force_stds.append(float(sampled_force.std(unbiased=False)))
         force = action.detach().reshape(1, 1).requires_grad_(True)
         critic_in = torch.cat((learner._condition(state), force / scale), dim=-1)
-        if hasattr(learner, "Q_net_1"):
-            value = torch.minimum(learner.Q_net_1(critic_in), learner.Q_net_2(critic_in)).sum()
+        critics = (learner.Q_net_1, learner.Q_net_2) if hasattr(learner, "Q_net_1") else (learner.Q_net,)
+        was_training = [net.training for net in critics]
+        for net in critics:
+            net.eval()
+        if len(critics) == 2:
+            value = torch.minimum(critics[0](critic_in), critics[1](critic_in)).sum()
         else:
-            value = learner.Q_net(critic_in).sum()
+            value = critics[0](critic_in).sum()
         slope = torch.autograd.grad(value, force)[0]
+        for net, training in zip(critics, was_training):
+            net.train(training)
         lqr = _force_from_physics(probe.unwrapped.pendulum.x, gain, limit)
         values.append(float(value.detach()))
         slopes.append(float(slope.detach()))
