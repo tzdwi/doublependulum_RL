@@ -3738,7 +3738,7 @@ def crossq_scaled_run(env, gain, learning_rate=None, adam_betas=None, label=None
     )
     print("observation uses the environment scales", flush=True)
     print(
-        f"reward scale {learner.reward_scale:g} buffer {learner.memory.memory.maxlen} "
+        f"reward scale {learner.reward_scale:g} buffer {learner.memory.capacity} "
         f"entropy weight {learner.log_alpha.exp().item():.6f} "
         f"target entropy {learner.target_entropy:.3f} "
         f"learning rate {learner.LR:g} adam betas {learner.adam_betas[0]:g} {learner.adam_betas[1]:g} "
@@ -3777,7 +3777,7 @@ def ddpg_scaled_run(env, gain, label="scaled ddpg", num_episodes=8000, on_audit=
     learner = DDPG_Learner()
     print("observation uses the environment scales", flush=True)
     print(
-        f"reward scale {learner.reward_scale:g} buffer {learner.memory.memory.maxlen}",
+        f"reward scale {learner.reward_scale:g} buffer {learner.memory.capacity}",
         flush=True,
     )
     learner.dump_best = lambda *args, **kwargs: None
@@ -3810,19 +3810,17 @@ def _load_module(module, state):
 
 
 def _capture_learner(learner):
-    count = len(learner.memory)
-    states = torch.empty(count, 8)
-    actions = torch.empty(count, 1)
-    nexts = torch.empty(count, 8)
-    rewards = torch.empty(count)
-    terminal = torch.empty(count, dtype=torch.bool)
-    for index, row in enumerate(learner.memory.memory):
-        states[index] = row.state.detach().reshape(-1).cpu()
-        actions[index] = row.action.detach().reshape(-1).cpu()
-        rewards[index] = row.reward.detach().reshape(-1).cpu().squeeze(0)
-        terminal[index] = row.next_state is None
-        if row.next_state is not None:
-            nexts[index] = row.next_state.detach().reshape(-1).cpu()
+    memory = learner.memory
+    count = len(memory)
+    if count < memory.capacity:
+        order = slice(0, count)
+    else:
+        order = (torch.arange(count, device=memory.states.device) + memory.position) % count
+    states = memory.states[order].detach().cpu()
+    actions = memory.actions[order].detach().cpu()
+    nexts = memory.next_states[order].detach().cpu()
+    rewards = memory.rewards[order].detach().cpu()
+    terminal = ~memory.non_final[order].detach().cpu()
     return {
         "states": states,
         "actions": actions,
@@ -4141,7 +4139,6 @@ def _audited_train(learner, gain, label, num_episodes, start_episode, on_audit):
     original_check = EarlyStop.check
 
     def remembering_check(self, durations, successes, actor_started, holdout_streak=0):
-        result = original_check(self, durations, successes, actor_started, holdout_streak=holdout_streak)
         counted = len(durations)
         if counted and counted % 100 == 0 and counted > start_episode:
             audit = _preserved_rng(lambda: _scaled_audit(
@@ -4150,7 +4147,10 @@ def _audited_train(learner, gain, label, num_episodes, start_episode, on_audit):
             stop = on_audit(counted, audit, learner)
             if stop:
                 return stop
-        return result
+        return original_check(
+            self, durations, successes, actor_started,
+            holdout_streak=getattr(learner, "holdout_streak", holdout_streak),
+        )
 
     EarlyStop.check = remembering_check
     try:
@@ -4315,7 +4315,7 @@ def _scaled_audit(name, learner, gain, counted, successes, durations):
     probe = init_env()
     limit = float(probe.unwrapped.max_F)
     tolerance = float(probe.unwrapped.theta_tol)
-    still_limit = 0.001 * np.mean([probe.unwrapped.l1, probe.unwrapped.l2]) / probe.unwrapped.dt
+    still_limit = float(probe.unwrapped._still_speed)
     episode_successes, lengths, openings = [], [], []
     stochastic_successes, stochastic_lengths = [], []
     pre_means, pre_stds, force_stds = [], [], []
@@ -4370,7 +4370,12 @@ def _scaled_audit(name, learner, gain, counted, successes, durations):
             done = terminated or truncated
             physical = wrapped_error(probe.unwrapped.pendulum.x)
             tilt = float(np.max(np.abs(physical[1:3])))
-            speed = float(np.max(np.abs(physical[3:6])))
+            cartesian = probe.unwrapped.pendulum.transform_cartesian(do_vels=True)
+            speed = max(
+                abs(cartesian[3]),
+                float(np.hypot(*cartesian[4])),
+                float(np.hypot(*cartesian[5])),
+            )
             if tilt < tolerance:
                 upright_steps += 1
                 speeds_when_upright.append(speed / still_limit)
@@ -4399,14 +4404,15 @@ def _scaled_audit(name, learner, gain, counted, successes, durations):
             done = terminated or truncated
         stochastic_successes.append(bool(info.get("success", False)))
         stochastic_lengths.append(length)
-    rows = list(learner.memory.memory)
-    stride = max(1, len(rows) // 4096)
-    tilts = []
-    for row in rows[::stride][:4096]:
-        observed = np.asarray(row.state.detach().cpu().numpy(), dtype=np.float64).reshape(-1)
-        tilts.append(np.max(np.abs(observed[1:3] * 0.5)))
-    tilts = np.asarray(tilts)
+    stored = len(learner.memory)
+    stride = max(1, stored // 4096)
+    picked = learner.memory.states[0:stored:stride][:4096].detach().cpu().numpy()
+    # Observation entries 1 and 2 are the upright angle errors divided by 0.5 rad.
+    tilts = np.max(np.abs(picked[:, 1:3] * 0.5), axis=1) if len(picked) else np.asarray([])
     holdout_successes = int(sum(episode_successes))
+    if not str(name).endswith(" best"):
+        full = len(episode_successes)
+        learner.holdout_streak = (getattr(learner, "holdout_streak", 0) + 1) if holdout_successes == full else 0
     median_length = float(np.median(lengths))
     score = (holdout_successes, median_length)
     if library_outcome.best is None or score > library_outcome.best["score"]:
@@ -4437,6 +4443,7 @@ def _scaled_audit(name, learner, gain, counted, successes, durations):
         f"recent median length {np.median(durations[-100:]):.0f} "
         f"{alpha_note}"
         f"holdout {holdout_successes}/20 median length {median_length:.0f} "
+        f"streak {getattr(learner, 'holdout_streak', 0)} "
         f"stochastic {int(sum(stochastic_successes))}/20 median length {np.median(stochastic_lengths):.0f} "
         f"opening |F| {np.median(openings):.3f} "
         f"{spread_note}"

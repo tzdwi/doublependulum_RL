@@ -29,7 +29,7 @@ def sac_policy_builder(n_observations):
 def ddpg_policy_builder(n_observations):
 	if not Path(DDPG_policy_pickle).is_file():
 		return None
-	net = DDPG_POLICY_DP(n_observations, scale=10.0).to(device)
+	net = DDPG_POLICY_DP(n_observations, scale=25.0).to(device)
 	try:
 		net.load_state_dict(load_checkpoint(DDPG_policy_pickle))
 		net.eval()
@@ -50,7 +50,7 @@ def ddpg_policy_builder(n_observations):
 
 def sac_action(state, SAC_POLICY_NET):
 	action_mu, _ = SAC_POLICY_NET(state).chunk(2, dim=-1)
-	action = 10.0*F.tanh(action_mu)
+	action = 25.0*F.tanh(action_mu)
 	return action
 
 def ddpg_action(state, DDPG_POLICY_NET):

@@ -1,4 +1,4 @@
-"""Audit one learner after the stillness reward was added.
+"""Audit one learner with the current reward, observation, and stop rule.
 
 Run it once per terminal, so each learner has its own Cursor terminal:
 
@@ -8,14 +8,16 @@ Run it once per terminal, so each learner has its own Cursor terminal:
 
 An optional second argument is the episode count (default 8000).
 
-DDPG and CrossQ use the settings in their train scripts. SAC does too: entropy
-weight 0.0001, frozen, reward divided by 100, replay of 2M. A held-out check on
-seeds 100-119 runs every 100 episodes and prints one short line. Nothing is
-written to the checkpoint files. The DDPG run also runs a probe every 500
-episodes and saves its networks to /tmp/stillness_ddpg_ep<N>.pt.
+DDPG and CrossQ use their training defaults. SAC learns its temperature,
+starting at 0.01 with a target near 2.11 nats, and keeps a replay of 2M.
+A held-out check on seeds 100-119 runs every 100 episodes and prints one short
+line. Three perfect checks in a row stop the run. Nothing is written to the
+checkpoint files. The DDPG run also probes every 500 episodes and saves its
+networks to /tmp/stillness_ddpg_ep<N>.pt.
 
-Rewards are multiplied by (1 - 0.99) inside each learner, so a perfect
-controller's value is 1. A critic value far above 1 is an overestimate.
+Rewards are divided by 1/(1 - 0.99) inside each learner, so a perfect
+controller's value is 1. A critic value far above 1 is an overestimate. Soft
+Q can sit a little above 1 because of the entropy bonus.
 """
 
 import re
@@ -50,7 +52,8 @@ def short_line(line):
         f"held-out {find(r'holdout (\d+/20)')} len {find(r'holdout \d+/20 median length (\d+)')} "
         f"stoch {find(r'stochastic (\d+/20)')} | longest hold {find(r'longest hold ([\d.]+)s')}s "
         f"| speed/limit {find(r'upright speed/limit ([\d.]+)')} | opening |F| {find(r'opening \|F\| ([\d.]+)')} "
-        f"| Q {find(r'median Q (-?[\d.]+)')} | toward LQR {find(r'toward LQR (\d+/20)')}"
+        f"| Q {find(r'median Q (-?[\d.]+)')} | streak {find(r'streak (\d+)')} "
+        f"| toward LQR {find(r'toward LQR (\d+/20)')}"
     )
 
 
@@ -105,8 +108,14 @@ def ddpg_probe(counted, learner, gain):
             return learner.Q_net(torch.cat((states, force.reshape(-1, 1) / scale), dim=1)).squeeze(1)
 
         q_policy, q_lqr, q_zero = value(chosen), value(lqr), value(torch.zeros_like(lqr))
-    recent = [row.action for row in list(learner.memory.memory)[-100000:]]
-    actions = torch.cat(recent).abs()
+    take = min(100000, len(learner.memory))
+    end = learner.memory.position
+    start = (end - take) % learner.memory.capacity
+    if start < end:
+        recent = learner.memory.actions[start:end]
+    else:
+        recent = torch.cat((learner.memory.actions[start:], learner.memory.actions[:end]), dim=0)
+    actions = recent.abs().reshape(-1)
     print(
         f"  probe ep {counted}: held-out policy |F| median {float(chosen.abs().median()):.1f} N, "
         f"at the rail {float((chosen.abs() >= 0.96 * scale).float().mean()):.0%}, "
@@ -136,7 +145,7 @@ def run_one(name, episodes):
         )
     elif name == "sac":
         diag.speed_penalty_run(
-            env, gain, alpha=0.0001, freeze_alpha=True,
+            env, gain, freeze_alpha=False,
             num_episodes=episodes, run_label="stillness sac",
         )
     else:
