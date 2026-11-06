@@ -39,9 +39,9 @@ class SAC_POLICY_DP(nn.Module):
     """
     def __init__(self, n_observations,):
         super(SAC_POLICY_DP, self).__init__()
-        self.layer1 = nn.Linear(n_observations, 128)
-        self.layer2 = nn.Linear(128, 128)
-        self.layer3 = nn.Linear(128, 2)
+        self.layer1 = nn.Linear(n_observations, 256)
+        self.layer2 = nn.Linear(256, 256)
+        self.layer3 = nn.Linear(256, 2)
         nn.init.zeros_(self.layer3.weight)
         nn.init.zeros_(self.layer3.bias)
         self.layer3.bias.data[1] = -1.0
@@ -63,9 +63,9 @@ class SAC_Q_DP(nn.Module):
     def __init__(self, n_observations):
         super(SAC_Q_DP, self).__init__()
         # we want the input to be n_observations+1 to include the action
-        self.layer1 = nn.Linear(n_observations+1, 128)
-        self.layer2 = nn.Linear(128, 128)
-        self.layer3 = nn.Linear(128, 1)
+        self.layer1 = nn.Linear(n_observations+1, 256)
+        self.layer2 = nn.Linear(256, 256)
+        self.layer3 = nn.Linear(256, 1)
         self.activation = nn.ReLU()
 
     # Called with either one element to determine next action's reward
