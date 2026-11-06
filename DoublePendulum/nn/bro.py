@@ -92,7 +92,7 @@ class BRO_Learner:
                  l1=10.0, 
                  m2=0.5, 
                  l2=10.0, 
-                 dt=0.03, 
+                 dt=0.01, 
                  theta_tol=np.pi/10,
                  batch_size=128,
                  replay_ratio=10,
@@ -159,6 +159,8 @@ class BRO_Learner:
         
         self.BATCH_SIZE = batch_size
         self.GAMMA = gamma
+        # A reward of 1 every decision then has value 1.
+        self.reward_scale = 1.0 / (1.0 - self.GAMMA)
         self._alpha_init = alpha_init
         self._beta_init = beta_init
         self._tau_init = tau_init
@@ -317,7 +319,7 @@ class BRO_Learner:
         batch = Transition(*zip(*transitions))
         state_batch = self._condition(torch.cat(batch.state))
         action_batch = torch.cat(batch.action)
-        reward_batch = torch.cat(batch.reward)
+        reward_batch = torch.cat(batch.reward) / self.reward_scale
         # Compute a mask of non-final states and concatenate the batch elements
         # (a final state would've been the one after which simulation ended)
         non_final_mask = torch.tensor(tuple(map(lambda s: s is not None,
@@ -329,7 +331,7 @@ class BRO_Learner:
                                                                 if s is not None]))
         state_batch = self._condition(torch.cat(batch.state))
         action_batch = torch.cat(batch.action)
-        reward_batch = torch.cat(batch.reward)
+        reward_batch = torch.cat(batch.reward) / self.reward_scale
 
         # Step 2: Calculate critic target value (no clipped double Q)
 

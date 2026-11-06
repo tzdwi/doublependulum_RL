@@ -67,7 +67,7 @@ class DoublePendulum:
                  l2 : float = 1.0,
                  theta1_init : float | None = None,
                  theta2_init : float | None = None,
-                 dt : float = 0.03):
+                 dt : float = 0.01):
         
         super(DoublePendulum, self).__init__()
         

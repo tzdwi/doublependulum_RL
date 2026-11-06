@@ -302,7 +302,7 @@ def _record_final(learner):
         record_policy_video(learner, [HOLDOUT_SEEDS[0]], None)
 
 
-def init_env(size=50, max_F=25.0, max_ang_vel=4*np.pi, mm=5.0, m1=0.5, l1=10.0, m2=0.5, l2=10.0, dt=0.03, theta_tol=np.pi/10, action_repeat=3, render_mode=None):
+def init_env(size=50, max_F=25.0, max_ang_vel=4*np.pi, mm=5.0, m1=0.5, l1=10.0, m2=0.5, l2=10.0, dt=0.01, theta_tol=np.pi/10, action_repeat=5, render_mode=None):
     max_episode_steps = int(max_seconds / (dt * action_repeat))
     env = gym.make("DoublePendulum/DoublePendulum-v0",
                    max_episode_steps=max_episode_steps,

@@ -17,7 +17,6 @@ def main():
         num_envs=num_envs,
         alpha=0.0001,
         freeze_alpha=True,
-        reward_scale=100.0,
         buffer_length=2_000_000,
     )
     print(f"Initialized, environments {num_envs}")

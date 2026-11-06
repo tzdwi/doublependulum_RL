@@ -142,7 +142,7 @@ class SAC_FLOWT_Learner:
 				 l1=10.0, 
 				 m2=0.5, 
 				 l2=10.0, 
-				 dt=0.03, 
+				 dt=0.01, 
 				 theta_tol=np.pi/10,
 				 batch_size=128,
 				 K=4,
@@ -157,7 +157,6 @@ class SAC_FLOWT_Learner:
 				 log_progress=False,
 				 obs_center=None,
 				 obs_spread=None,
-				 reward_scale=1.0,
 				 freeze_alpha=False,
 				 adam_betas=(0.9, 0.999),
 				 num_envs=1):
@@ -208,7 +207,8 @@ class SAC_FLOWT_Learner:
 		n_observations = len(state)
 		n_actions = self.env.action_space.shape[0]
 		self.scale = float(self.env.action_space.high[0])
-		self.reward_scale = reward_scale
+		# A reward of 1 every decision then has value 1.
+		self.reward_scale = 1.0 / (1.0 - self.GAMMA)
 		self.obs_center = None if obs_center is None else torch.as_tensor(obs_center, dtype=torch.float32, device=device)
 		self.obs_spread = None if obs_spread is None else torch.as_tensor(obs_spread, dtype=torch.float32, device=device)
 		self.freeze_alpha = freeze_alpha

@@ -14,8 +14,8 @@ seeds 100-119 runs every 100 episodes and prints one short line. Nothing is
 written to the checkpoint files. The DDPG run also runs a probe every 500
 episodes and saves its networks to /tmp/stillness_ddpg_ep<N>.pt.
 
-With reward divided by 100, a perfect controller's value is at most 2.0 (LQR
-scores about 1.97), so a critic value far above 2 is an overestimate.
+Rewards are multiplied by (1 - 0.99) inside each learner, so a perfect
+controller's value is 1. A critic value far above 1 is an overestimate.
 """
 
 import re
@@ -82,7 +82,7 @@ def ddpg_probe(counted, learner, gain):
     if counted % 500:
         return
     scale = float(learner.policy_net.scale)
-    ceiling = 2.0 / learner.reward_scale / (1.0 - learner.GAMMA)
+    ceiling = 1.0 / learner.reward_scale / (1.0 - learner.GAMMA)
     env = diag.init_env()
     observations, lqr_forces = [], []
     for seed in range(100, 120):
@@ -128,7 +128,7 @@ def run_one(name, episodes):
     sys.stdout = ShortLines(sys.stdout)
     env = diag.init_env()
     gain = diag.discrete_lqr(env.unwrapped)
-    print(f"{name}: value ceiling for this reward is 2.0 (LQR scores about 1.97)", flush=True)
+    print(f"{name}: value ceiling for this reward is 1.0", flush=True)
     if name == "ddpg":
         diag.ddpg_scaled_run(
             env, gain, label="stillness ddpg", num_episodes=episodes,

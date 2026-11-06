@@ -3608,7 +3608,7 @@ def _paired_q(learner, observations, forces):
 def scaled_sac(env, gain, freeze_alpha=False):
     """Train SAC on the environment's own observation scales, with rewards divided by 100."""
     def build():
-        return SAC_Learner(reward_scale=100.0, freeze_alpha=freeze_alpha)
+        return SAC_Learner(freeze_alpha=freeze_alpha)
 
     label = "fixed-alpha SAC" if freeze_alpha else "scaled SAC"
     library_outcome(label, build, trace=True, gain=gain)
@@ -3680,7 +3680,6 @@ def speed_penalty_run(env, gain, protected=False, adam_betas=None, archive_bc=Fa
     if run_label is not None:
         label = run_label
     learner = SAC_Learner(
-        reward_scale=100.0,
         freeze_alpha=freeze_alpha,
         buffer_length=1_800_000 if protected else 2_000_000,
         adam_betas=adam_betas if adam_betas is not None else (0.9, 0.999),
@@ -3734,7 +3733,6 @@ def crossq_scaled_run(env, gain, learning_rate=None, adam_betas=None, label=None
     _reseed(0)
     library_outcome.best = None
     learner = CrossQ_Learner(
-        reward_scale=100.0,
         **({} if learning_rate is None else {"learning_rate": learning_rate}),
         **({} if adam_betas is None else {"adam_betas": adam_betas}),
     )
@@ -3776,7 +3774,7 @@ def ddpg_scaled_run(env, gain, label="scaled ddpg", num_episodes=8000, on_audit=
 
     _reseed(0)
     library_outcome.best = None
-    learner = DDPG_Learner(reward_scale=100.0)
+    learner = DDPG_Learner()
     print("observation uses the environment scales", flush=True)
     print(
         f"reward scale {learner.reward_scale:g} buffer {learner.memory.memory.maxlen}",
@@ -3885,7 +3883,7 @@ def _branch_learner(captured, replay=None):
     source = captured if replay is None else replay
     learner = SAC_Learner(
         obs_center=captured["center"], obs_spread=captured["spread"],
-        reward_scale=100.0, freeze_alpha=True,
+ freeze_alpha=True,
     )
     _load_module(learner.policy_net, captured["policy"])
     _load_module(learner.Q_net_1, captured["q1"])
@@ -3998,7 +3996,7 @@ def frozen_replay_split(env, gain):
     try:
         library_outcome.best = None
         _reseed(0)
-        learner = SAC_Learner(reward_scale=100.0, freeze_alpha=True)
+        learner = SAC_Learner(freeze_alpha=True)
         learner.dump_best = lambda *args, **kwargs: None
         remembering_check.learner = learner
         learner.train(num_episodes=4000)
@@ -4083,7 +4081,7 @@ def replay_swap(env, gain):
     try:
         library_outcome.best = None
         _reseed(0)
-        learner = SAC_Learner(reward_scale=100.0, freeze_alpha=True)
+        learner = SAC_Learner(freeze_alpha=True)
         learner.dump_best = lambda *args, **kwargs: None
         remembering_check.learner = learner
         learner.train(num_episodes=8000)
@@ -4215,7 +4213,7 @@ def failure_tests(env, gain):
     try:
         library_outcome.best = None
         _reseed(0)
-        learner = SAC_Learner(reward_scale=100.0, freeze_alpha=True)
+        learner = SAC_Learner(freeze_alpha=True)
         learner.dump_best = lambda *args, **kwargs: None
         _audited_train(learner, gain, "buffer 1M", 8000, 0, on_audit)
         del learner
@@ -4792,7 +4790,7 @@ def crossq_critic_probe(env, gain, train_states=300, val_states=100, steps=6000)
         total, weight, force = 0.0, 1.0, first_force
         for _ in range(horizon):
             _, reward, terminated, truncated, _ = env.step(force)
-            total += weight * float(reward) / 100.0
+            total += weight * float(reward) * (1.0 - gamma)
             weight *= gamma
             if terminated or truncated:
                 break

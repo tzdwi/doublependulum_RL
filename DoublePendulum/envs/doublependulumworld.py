@@ -18,7 +18,7 @@ class DoublePendulumEnv(gym.Env):
     SCREEN_DIM = 720
     SUCCESS_TIME = 5 # We'll have won if we get the thing to stand up for 5 seconds
 
-    def __init__(self, render_mode=None, size=50, max_F=25.0, max_ang_vel=4*np.pi, mm=5.0, m1=0.5, l1=10.0, m2=0.5, l2=10.0, dt=0.03, theta_tol=np.pi/10, action_repeat=3):
+    def __init__(self, render_mode=None, size=50, max_F=25.0, max_ang_vel=4*np.pi, mm=5.0, m1=0.5, l1=10.0, m2=0.5, l2=10.0, dt=0.01, theta_tol=np.pi/10, action_repeat=5):
         self.size = size  # The size of the track
         self.max_F = max_F # maximum applied F in Neutons
         self.max_ang_vel = max_ang_vel # we'll allow the second pendulum to go faster though 
@@ -41,7 +41,8 @@ class DoublePendulumEnv(gym.Env):
 
         # at current defaults, speed scale is ~3.333 m/s
         self.speed_scale = 0.01*np.mean([self.l1, self.l2])/self.dt
-        self._still_speed = 0.001 * float(np.mean([self.l1, self.l2])) / self.dt
+        # Success speed stays 1/3 m/s, the value from a 0.03 s step. It does not follow the integrator step.
+        self._still_speed = 0.001 * float(np.mean([self.l1, self.l2])) / 0.03
 
         self.pendulum = DoublePendulum(mm=mm, m1=m1, m2=m2, l1=l1, l2=l2, dt=dt)
         self._agent_location=0.0

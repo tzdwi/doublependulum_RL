@@ -86,7 +86,7 @@ class SAC_Learner:
                  l1=10.0, 
                  m2=0.5, 
                  l2=10.0, 
-                 dt=0.03, 
+                 dt=0.01, 
                  theta_tol=np.pi/10,
                  batch_size=128,
                  gamma=0.99,
@@ -100,7 +100,6 @@ class SAC_Learner:
                  log_progress=False,
                  obs_center=None,
                  obs_spread=None,
-                 reward_scale=1.0,
                  freeze_alpha=False,
                  target_entropy=-1.0,
                  min_alpha=None,
@@ -153,7 +152,8 @@ class SAC_Learner:
         self.state = state
         n_observations = len(state)
         self.scale = float(self.env.action_space.high[0])
-        self.reward_scale = reward_scale
+        # A reward of 1 every decision then has value 1.
+        self.reward_scale = 1.0 / (1.0 - self.GAMMA)
         self.obs_center = None if obs_center is None else torch.as_tensor(obs_center, dtype=torch.float32, device=device)
         self.obs_spread = None if obs_spread is None else torch.as_tensor(obs_spread, dtype=torch.float32, device=device)
         self.freeze_alpha = freeze_alpha

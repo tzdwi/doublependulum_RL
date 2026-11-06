@@ -144,7 +144,7 @@ class CrossQ_Learner:
                  l1=10.0, 
                  m2=0.5, 
                  l2=10.0, 
-                 dt=0.03, 
+                 dt=0.01, 
                  theta_tol=np.pi/10,
                  batch_size=128,
                  gamma=0.99,
@@ -157,7 +157,6 @@ class CrossQ_Learner:
                  log_progress=False,
                  obs_center=None,
                  obs_spread=None,
-                 reward_scale=100.0,
                  adam_betas=(0.5, 0.999),
                  num_envs=1):
 
@@ -198,7 +197,8 @@ class CrossQ_Learner:
         self.LR = learning_rate
         self.obs_center = None if obs_center is None else torch.as_tensor(obs_center, dtype=torch.float32, device=device)
         self.obs_spread = None if obs_spread is None else torch.as_tensor(obs_spread, dtype=torch.float32, device=device)
-        self.reward_scale = reward_scale
+        # A reward of 1 every decision then has value 1.
+        self.reward_scale = 1.0 / (1.0 - self.GAMMA)
         
         # Get the number of state observations
         state, info = self.env.reset()
