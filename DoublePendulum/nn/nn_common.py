@@ -22,6 +22,24 @@ plot_dir = str(Path(__file__).parent.parent.parent)+"/scripts/figures"
 vid_dir = str(Path(__file__).parent.parent.parent)+"/scripts/videos"
 HOLDOUT_SEEDS = list(range(100, 120))
 
+# Bump this whenever the reward, observation, or timing changes. Checkpoints saved under another stamp will not load.
+CHECKPOINT_VERSION = "reward-v3 obs-v2 timing-dt0.01x5 scale-1/(1-gamma)"
+
+
+def save_checkpoint(state_dict, path):
+    torch.save({"version": CHECKPOINT_VERSION, "state": state_dict}, path)
+
+
+def load_checkpoint(path, weights_only=True, map_location=None):
+    blob = torch.load(path, weights_only=True, map_location=map_location or device)
+    found = blob.get("version") if isinstance(blob, dict) else None
+    if found != CHECKPOINT_VERSION:
+        raise RuntimeError(
+            f"{path} was saved as {found!r}, expected {CHECKPOINT_VERSION!r}; "
+            "it predates the current reward or observation and will not load"
+        )
+    return blob["state"]
+
 def prepare_parallel(learner, num_envs, **kwargs):
     learner.num_envs = int(num_envs)
     learner._env_kwargs = kwargs
@@ -132,6 +150,7 @@ def run_parallel(learner, num_episodes, start_episode, choose_actions, on_step, 
                         learner.episode_durations,
                         learner.final_state_balanced,
                         actor_started(),
+                        holdout_streak=getattr(learner, "holdout_streak", 0),
                     )
                     new_episodes += 1
                     if bar is not None:
@@ -209,14 +228,29 @@ def _as_state(observation):
     return torch.tensor(observation, dtype=torch.float32, device=device).unsqueeze(0)
 
 
-def _write_decision(writer, learner, envs, states, active, canvas, overlay):
+def _critic_value(learner, state, force):
+    """The critic's value of this force at this state, in learner units (a perfect controller is 1)."""
+    with torch.no_grad():
+        action = torch.tensor([[force]], dtype=torch.float32, device=device)
+        q_in = torch.cat((learner._condition(state), action / float(learner.env.action_space.high[0])), dim=-1)
+        if hasattr(learner, "calc_Qs"):
+            return float(torch.stack(learner.calc_Qs(q_in)).mean())
+        if hasattr(learner, "Q_net"):
+            return float(learner.Q_net(q_in))
+        return float(torch.min(learner.Q_net_1(q_in), learner.Q_net_2(q_in)))
+
+
+def _write_decision(writer, learner, envs, states, active, canvas, overlay, forces=None):
     """Hold one force and write a frame after every physics step."""
     running = []
     for i, env in enumerate(envs):
         if not active[i]:
             continue
         plant = env.unwrapped
-        plant.hold_force(_policy_force(learner, states[i]))
+        force = _policy_force(learner, states[i])
+        plant.hold_force(force)
+        if forces is not None:
+            forces.append(force)
         running.append((i, plant, []))
     if not running:
         return
@@ -268,6 +302,8 @@ def record_policy_video(learner, seeds, episode_number):
     for env, seed in zip(envs, seeds):
         observation, _ = env.reset(seed=int(seed))
         states.append(_as_state(observation))
+    start_values = [_critic_value(learner, state, _policy_force(learner, state)) for state in states]
+    forces = []
     active = [True] * len(envs)
     limit = int(envs[0].spec.max_episode_steps)
     os.makedirs(vid_dir, exist_ok=True)
@@ -277,21 +313,31 @@ def record_policy_video(learner, seeds, episode_number):
     try:
         decisions = 0
         while any(active) and decisions < limit:
-            _write_decision(writer, learner, envs, states, active, canvas, overlay)
+            _write_decision(writer, learner, envs, states, active, canvas, overlay, forces)
             decisions += 1
     finally:
         writer.close()
     plants = [env.unwrapped for env in envs]
-    return sum(
+    score = sum(
         1 for i, plant in enumerate(plants)
         if active[i] and plant.success_frames * plant.dt >= plant.SUCCESS_TIME
     )
+    stats = {
+        "q": float(np.median(start_values)),
+        "saturated": float(np.mean(np.abs(forces) > 24.0)) if forces else 0.0,
+    }
+    return score, stats
 
 
 def _maybe_record(learner, episode_index):
     if learner.log_env and episode_index > 0 and episode_index % 250 == 0:
-        score = record_policy_video(learner, HOLDOUT_SEEDS, episode_index)
-        print(f"held-out {score}/{len(HOLDOUT_SEEDS)} at episode {episode_index}")
+        score, stats = record_policy_video(learner, HOLDOUT_SEEDS, episode_index)
+        full = len(HOLDOUT_SEEDS)
+        learner.holdout_streak = (getattr(learner, "holdout_streak", 0) + 1) if score == full else 0
+        print(
+            f"held-out {score}/{full} at episode {episode_index}, perfect checks in a row {learner.holdout_streak}; "
+            f"critic {stats['q']:.3f} (ceiling 1.000); actions past 24 N {stats['saturated']:.3f}"
+        )
         if score > getattr(learner, "holdout_best", -1):
             learner.holdout_best = score
             learner.dump_best(episode_index, None)
@@ -335,46 +381,16 @@ def uniform_warmup_action(action_space):
     return float(np.random.uniform(action_space.low[0], action_space.high[0]))
 
 class EarlyStop:
-    """Stop training once the task is solved, or once episode length stops improving."""
+    """Stop once the deterministic policy scores every held-out seed on several checks in a row."""
 
-    def __init__(self, window=100, solved_count=95, patience=10000, min_gain=5):
-        self.window = window
-        self.solved_count = solved_count
-        self.patience = patience
-        self.min_gain = min_gain
-        self.best = None
-        self.since = 0
-        self.hold = 0
-        self.improved = False
+    def __init__(self, checks_needed=3):
+        self.checks_needed = checks_needed
 
-    def reset(self):
-        # Keep the all-time best so a post-reset dip cannot replace its checkpoint.
-        # Restart the stall timer, and ignore windows that still contain pre-reset episodes.
-        self.since = 0
-        self.hold = self.window
-        self.improved = False
-
-    def check(self, durations, successes, actor_started):
-        self.improved = False
-        if len(durations) < self.window or not actor_started:
-            return None
-        if self.hold:
-            self.hold -= 1
-            return None
-        recent = durations[-self.window:]
-        recent_len = float(np.mean(recent))
-        recent_succ = int(sum(successes[-self.window:]))
-        if recent_succ >= self.solved_count:
-            return f"solved: {recent_succ}/{self.window} of the last episodes succeeded"
-        if self.best is None or recent_len > self.best + self.min_gain:
-            self.best = recent_len
-            self.since = 0
-            self.improved = True
-        else:
-            self.since += 1
-            if self.since >= self.patience:
-                return (f"stalled: mean length {recent_len:.0f} has not beaten {self.best:.0f} "
-                        f"by {self.min_gain} for {self.patience} episodes")
+    def check(self, durations, successes, actor_started, holdout_streak=0):
+        # durations and successes come from the training episodes and no longer decide the stop.
+        if actor_started and holdout_streak >= self.checks_needed:
+            full = len(HOLDOUT_SEEDS)
+            return f"solved: {holdout_streak} held-out checks in a row at {full}/{full}"
         return None
 
 # if GPU is to be used

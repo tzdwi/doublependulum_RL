@@ -5,14 +5,14 @@ from pathlib import Path
 from DoublePendulum.nn.sac import SAC_POLICY_DP, SAC_policy_pickle
 from DoublePendulum.nn.ddpg import DDPG_POLICY_DP, DDPG_policy_pickle
 
-from DoublePendulum.nn.nn_common import device
+from DoublePendulum.nn.nn_common import device, load_checkpoint
 
 def sac_policy_builder(n_observations):
 	if not Path(SAC_policy_pickle).is_file():
 		return None
 	net = SAC_POLICY_DP(n_observations).to(device)
 	try:
-		net.load_state_dict(torch.load(SAC_policy_pickle, weights_only=True, map_location=device))
+		net.load_state_dict(load_checkpoint(SAC_policy_pickle))
 		net.eval()
 	except RuntimeError:
 		print("Failed assigning pre-saved weights, returning empty model")
@@ -31,7 +31,7 @@ def ddpg_policy_builder(n_observations):
 		return None
 	net = DDPG_POLICY_DP(n_observations, scale=10.0).to(device)
 	try:
-		net.load_state_dict(torch.load(DDPG_policy_pickle, weights_only=True, map_location=device))
+		net.load_state_dict(load_checkpoint(DDPG_policy_pickle))
 		net.eval()
 	except RuntimeError:
 		print("Failed assigning pre-saved weights, returning empty model")

@@ -16,7 +16,7 @@ import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
 
-from .nn_common import this_dir, plot_dir, init_env, device, Transition, ReplayMemory, warmup_action, EarlyStop, polyak_update, prepare_parallel, run_parallel, _maybe_record, _record_final, _shift_training_seed
+from .nn_common import save_checkpoint, load_checkpoint, this_dir, plot_dir, init_env, device, Transition, ReplayMemory, warmup_action, EarlyStop, polyak_update, prepare_parallel, run_parallel, _maybe_record, _record_final, _shift_training_seed
 from .sac import SAC_Q_DP
 from .sac_flowg import TIME_EMB_MLP
 
@@ -447,7 +447,8 @@ class SAC_FLOWT_Learner:
 						self.final_state_truncated.append(0)
 					stop = early.check(
 						self.episode_durations, self.final_state_balanced,
-						self.steps_done > self.start_steps + self.actor_holdback)
+						self.steps_done > self.start_steps + self.actor_holdback,
+						holdout_streak=getattr(self, "holdout_streak", 0))
 					break
 			if stop:
 				print(stop)
@@ -477,15 +478,15 @@ class SAC_FLOWT_Learner:
 
 	def dump(self):
 		os.makedirs(os.path.dirname(SAC_T_velocity_pickle), exist_ok=True)
-		torch.save(self.velocity_net.state_dict(), SAC_T_velocity_pickle)
-		torch.save(self.Q_target_1.state_dict(), SAC_T_Q1_pickle)
-		torch.save(self.Q_target_2.state_dict(), SAC_T_Q2_pickle)
+		save_checkpoint(self.velocity_net.state_dict(), SAC_T_velocity_pickle)
+		save_checkpoint(self.Q_target_1.state_dict(), SAC_T_Q1_pickle)
+		save_checkpoint(self.Q_target_2.state_dict(), SAC_T_Q2_pickle)
 
 	def dump_best(self, episode, mean_length):
 		os.makedirs(os.path.dirname(SAC_T_velocity_best_pickle), exist_ok=True)
-		torch.save(self.velocity_net.state_dict(), SAC_T_velocity_best_pickle)
-		torch.save(self.Q_target_1.state_dict(), SAC_T_Q1_best_pickle)
-		torch.save(self.Q_target_2.state_dict(), SAC_T_Q2_best_pickle)
+		save_checkpoint(self.velocity_net.state_dict(), SAC_T_velocity_best_pickle)
+		save_checkpoint(self.Q_target_1.state_dict(), SAC_T_Q1_best_pickle)
+		save_checkpoint(self.Q_target_2.state_dict(), SAC_T_Q2_best_pickle)
 		length = "n/a" if mean_length is None else f"{mean_length:.0f}"
 		print(f"saved best policy at episode {episode}, mean length {length}")
 
@@ -493,9 +494,9 @@ class SAC_FLOWT_Learner:
 		velocity_path = SAC_T_velocity_best_pickle if best else SAC_T_velocity_pickle
 		q1_path = SAC_T_Q1_best_pickle if best else SAC_T_Q1_pickle
 		q2_path = SAC_T_Q2_best_pickle if best else SAC_T_Q2_pickle
-		self.velocity_net.load_state_dict(torch.load(velocity_path, weights_only=True, map_location=device))
-		self.Q_target_1.load_state_dict(torch.load(q1_path, weights_only=True, map_location=device))
-		self.Q_target_2.load_state_dict(torch.load(q2_path, weights_only=True, map_location=device))
+		self.velocity_net.load_state_dict(load_checkpoint(velocity_path, weights_only=True, map_location=device))
+		self.Q_target_1.load_state_dict(load_checkpoint(q1_path, weights_only=True, map_location=device))
+		self.Q_target_2.load_state_dict(load_checkpoint(q2_path, weights_only=True, map_location=device))
 
 		self.Q_net_1.load_state_dict(self.Q_target_1.state_dict())
 		self.Q_net_2.load_state_dict(self.Q_target_2.state_dict())

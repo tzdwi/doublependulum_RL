@@ -20,7 +20,7 @@ import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
 
-from .nn_common import this_dir, plot_dir, init_env, device, Transition, ReplayMemory, warmup_action, EarlyStop, polyak_update, prepare_parallel, run_parallel, _maybe_record, _record_final, _shift_training_seed
+from .nn_common import save_checkpoint, load_checkpoint, this_dir, plot_dir, init_env, device, Transition, ReplayMemory, warmup_action, EarlyStop, polyak_update, prepare_parallel, run_parallel, _maybe_record, _record_final, _shift_training_seed
 
 BRO_optimistic_pickle = this_dir+"/pickles/bro_optimistic_net.pt"
 BRO_pessimistic_pickle = this_dir+"/pickles/bro_pessimistic_net.pt"
@@ -480,7 +480,7 @@ class BRO_Learner:
             if (since_actor in self.reset_steps) or ((since_actor > 0) and (since_actor % self.reset_steps[-1] == 0)):
                 self.initialize_params()
                 self.actor_start_step = self.steps_done + self.reset_holdback
-                early.reset()
+                self.holdout_streak = 0
             actor_ready = self.steps_done > self.actor_start_step
             for _ in range(self.replay_ratio):
                 self.optimize_model(do_policy_step=actor_ready)
@@ -539,7 +539,7 @@ class BRO_Learner:
                         #reset
                         self.initialize_params()
                         self.actor_start_step = self.steps_done + self.reset_holdback
-                        early.reset()
+                        self.holdout_streak = 0
         
                     actor_ready = self.steps_done > self.actor_start_step
                     for i in range(self.replay_ratio):
@@ -559,7 +559,8 @@ class BRO_Learner:
                         self.final_state_truncated.append(0)
                     stop = early.check(
                         self.episode_durations, self.final_state_balanced,
-                        self.steps_done > self.actor_start_step)
+                        self.steps_done > self.actor_start_step,
+                        holdout_streak=getattr(self, "holdout_streak", 0))
                     break
             if stop:
                 print(stop)
@@ -589,17 +590,17 @@ class BRO_Learner:
 
     def dump(self):
         os.makedirs(os.path.dirname(BRO_optimistic_pickle), exist_ok=True)
-        torch.save(self.optimistic_net.state_dict(), BRO_optimistic_pickle)
-        torch.save(self.pessimistic_net.state_dict(), BRO_pessimistic_pickle)
-        torch.save(self.Q_net_1.state_dict(), BRO_Q1_pickle)
-        torch.save(self.Q_net_2.state_dict(), BRO_Q2_pickle)
+        save_checkpoint(self.optimistic_net.state_dict(), BRO_optimistic_pickle)
+        save_checkpoint(self.pessimistic_net.state_dict(), BRO_pessimistic_pickle)
+        save_checkpoint(self.Q_net_1.state_dict(), BRO_Q1_pickle)
+        save_checkpoint(self.Q_net_2.state_dict(), BRO_Q2_pickle)
 
     def dump_best(self, episode, mean_length):
         os.makedirs(os.path.dirname(BRO_optimistic_best_pickle), exist_ok=True)
-        torch.save(self.optimistic_net.state_dict(), BRO_optimistic_best_pickle)
-        torch.save(self.pessimistic_net.state_dict(), BRO_pessimistic_best_pickle)
-        torch.save(self.Q_net_1.state_dict(), BRO_Q1_best_pickle)
-        torch.save(self.Q_net_2.state_dict(), BRO_Q2_best_pickle)
+        save_checkpoint(self.optimistic_net.state_dict(), BRO_optimistic_best_pickle)
+        save_checkpoint(self.pessimistic_net.state_dict(), BRO_pessimistic_best_pickle)
+        save_checkpoint(self.Q_net_1.state_dict(), BRO_Q1_best_pickle)
+        save_checkpoint(self.Q_net_2.state_dict(), BRO_Q2_best_pickle)
         length = "n/a" if mean_length is None else f"{mean_length:.0f}"
         print(f"saved best policy at episode {episode}, mean length {length}")
 
@@ -608,9 +609,9 @@ class BRO_Learner:
         pessimistic_path = BRO_pessimistic_best_pickle if best else BRO_pessimistic_pickle
         q1_path = BRO_Q1_best_pickle if best else BRO_Q1_pickle
         q2_path = BRO_Q2_best_pickle if best else BRO_Q2_pickle
-        self.optimistic_net.load_state_dict(torch.load(optimistic_path, weights_only=True, map_location=device))
-        self.pessimistic_net.load_state_dict(torch.load(pessimistic_path, weights_only=True, map_location=device))
-        self.Q_net_1.load_state_dict(torch.load(q1_path, weights_only=True, map_location=device))
-        self.Q_net_2.load_state_dict(torch.load(q2_path, weights_only=True, map_location=device))
+        self.optimistic_net.load_state_dict(load_checkpoint(optimistic_path, weights_only=True, map_location=device))
+        self.pessimistic_net.load_state_dict(load_checkpoint(pessimistic_path, weights_only=True, map_location=device))
+        self.Q_net_1.load_state_dict(load_checkpoint(q1_path, weights_only=True, map_location=device))
+        self.Q_net_2.load_state_dict(load_checkpoint(q2_path, weights_only=True, map_location=device))
         self.Q_target_1.load_state_dict(self.Q_net_1.state_dict())
         self.Q_target_2.load_state_dict(self.Q_net_2.state_dict())

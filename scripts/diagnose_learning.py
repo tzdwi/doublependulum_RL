@@ -3976,8 +3976,8 @@ def frozen_replay_split(env, gain):
     original_check = EarlyStop.check
     captured = {}
 
-    def remembering_check(self, durations, successes, actor_started):
-        result = original_check(self, durations, successes, actor_started)
+    def remembering_check(self, durations, successes, actor_started, holdout_streak=0):
+        result = original_check(self, durations, successes, actor_started, holdout_streak=holdout_streak)
         counted = len(durations)
         if counted and counted % 100 == 0:
             _preserved_rng(lambda: _scaled_audit(
@@ -4047,8 +4047,8 @@ def replay_swap(env, gain):
     original_check = EarlyStop.check
     shots = {}
 
-    def remembering_check(self, durations, successes, actor_started):
-        result = original_check(self, durations, successes, actor_started)
+    def remembering_check(self, durations, successes, actor_started, holdout_streak=0):
+        result = original_check(self, durations, successes, actor_started, holdout_streak=holdout_streak)
         counted = len(durations)
         if counted and counted % 100 == 0:
             audit = _preserved_rng(lambda: _scaled_audit(
@@ -4140,8 +4140,8 @@ def _audited_train(learner, gain, label, num_episodes, start_episode, on_audit):
 
     original_check = EarlyStop.check
 
-    def remembering_check(self, durations, successes, actor_started):
-        result = original_check(self, durations, successes, actor_started)
+    def remembering_check(self, durations, successes, actor_started, holdout_streak=0):
+        result = original_check(self, durations, successes, actor_started, holdout_streak=holdout_streak)
         counted = len(durations)
         if counted and counted % 100 == 0 and counted > start_episode:
             audit = _preserved_rng(lambda: _scaled_audit(
@@ -4256,8 +4256,8 @@ def library_outcome(name, builder=None, trace=False, gain=None):
 
     original_check = EarlyStop.check
 
-    def remembering_check(self, durations, successes, actor_started):
-        result = original_check(self, durations, successes, actor_started)
+    def remembering_check(self, durations, successes, actor_started, holdout_streak=0):
+        result = original_check(self, durations, successes, actor_started, holdout_streak=holdout_streak)
         if result:
             EarlyStop.last_result = result
         counted = len(durations)

@@ -15,7 +15,7 @@ import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
 
-from .nn_common import this_dir, plot_dir, init_env, device, Transition, ReplayMemory, uniform_warmup_action, EarlyStop, prepare_parallel, run_parallel, _maybe_record, _record_final, _shift_training_seed
+from .nn_common import save_checkpoint, load_checkpoint, this_dir, plot_dir, init_env, device, Transition, ReplayMemory, uniform_warmup_action, EarlyStop, prepare_parallel, run_parallel, _maybe_record, _record_final, _shift_training_seed
 
 CQ_policy_pickle = this_dir+"/pickles/crossq_policy_net.pt"
 CQ_Q1_pickle = this_dir+"/pickles/crossq_q1_net.pt"
@@ -485,7 +485,8 @@ class CrossQ_Learner:
                         self.final_state_truncated.append(0)
                     stop = early.check(
                         self.episode_durations, self.final_state_balanced,
-                        self.steps_done > self.start_steps + self.actor_holdback)
+                        self.steps_done > self.start_steps + self.actor_holdback,
+                        holdout_streak=getattr(self, "holdout_streak", 0))
                     break
             if stop:
                 print(stop)
@@ -515,15 +516,15 @@ class CrossQ_Learner:
 
     def dump(self):
         os.makedirs(os.path.dirname(CQ_policy_pickle), exist_ok=True)
-        torch.save(self.policy_net.state_dict(), CQ_policy_pickle)
-        torch.save(self.Q_net_1.state_dict(), CQ_Q1_pickle)
-        torch.save(self.Q_net_2.state_dict(), CQ_Q2_pickle)
+        save_checkpoint(self.policy_net.state_dict(), CQ_policy_pickle)
+        save_checkpoint(self.Q_net_1.state_dict(), CQ_Q1_pickle)
+        save_checkpoint(self.Q_net_2.state_dict(), CQ_Q2_pickle)
 
     def dump_best(self, episode, mean_length):
         os.makedirs(os.path.dirname(CQ_policy_best_pickle), exist_ok=True)
-        torch.save(self.policy_net.state_dict(), CQ_policy_best_pickle)
-        torch.save(self.Q_net_1.state_dict(), CQ_Q1_best_pickle)
-        torch.save(self.Q_net_2.state_dict(), CQ_Q2_best_pickle)
+        save_checkpoint(self.policy_net.state_dict(), CQ_policy_best_pickle)
+        save_checkpoint(self.Q_net_1.state_dict(), CQ_Q1_best_pickle)
+        save_checkpoint(self.Q_net_2.state_dict(), CQ_Q2_best_pickle)
         length = "n/a" if mean_length is None else f"{mean_length:.0f}"
         print(f"saved best policy at episode {episode}, mean length {length}")
 
@@ -531,6 +532,6 @@ class CrossQ_Learner:
         policy_path = CQ_policy_best_pickle if best else CQ_policy_pickle
         q1_path = CQ_Q1_best_pickle if best else CQ_Q1_pickle
         q2_path = CQ_Q2_best_pickle if best else CQ_Q2_pickle
-        self.policy_net.load_state_dict(torch.load(policy_path, weights_only=True, map_location=device))
-        self.Q_net_1.load_state_dict(torch.load(q1_path, weights_only=True, map_location=device))
-        self.Q_net_2.load_state_dict(torch.load(q2_path, weights_only=True, map_location=device))
+        self.policy_net.load_state_dict(load_checkpoint(policy_path, weights_only=True, map_location=device))
+        self.Q_net_1.load_state_dict(load_checkpoint(q1_path, weights_only=True, map_location=device))
+        self.Q_net_2.load_state_dict(load_checkpoint(q2_path, weights_only=True, map_location=device))
