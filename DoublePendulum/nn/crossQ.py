@@ -148,7 +148,7 @@ class CrossQ_Learner:
                  theta_tol=np.pi/10,
                  batch_size=128,
                  gamma=0.99,
-                 alpha=0.01,
+                 alpha=None,
                  learning_rate=1e-3,
                  start_steps=2000,
                  buffer_length=1e6,
@@ -206,10 +206,14 @@ class CrossQ_Learner:
         n_observations = len(state)
         self.scale = float(self.env.action_space.high[0])
 
+        # The reward is divided by 1/(1-γ), so one perfect decision is worth 1-γ.
+        # Starting the temperature there makes one nat of entropy worth the same decision.
+        if alpha is None:
+            alpha = 1.0 - gamma
         self.log_alpha = torch.tensor(math.log(alpha), device=device, requires_grad=True)
         self.alpha_optimizer = optim.Adam([self.log_alpha], lr=self.LR)
-        # One nat of randomness in force units.
-        self.target_entropy = -1.0
+        # Entropy of a Gaussian force with a standard deviation of 2 N.
+        self.target_entropy = 0.5 * math.log(2.0 * math.pi * math.e * 4.0)
 
         # Net to predict the next action
         self.policy_net = CQ_POLICY_DP(n_observations).to(device)

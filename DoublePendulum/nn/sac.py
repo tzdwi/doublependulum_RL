@@ -91,7 +91,7 @@ class SAC_Learner:
                  batch_size=128,
                  gamma=0.99,
                  tau=0.995,
-                 alpha=0.03,
+                 alpha=None,
                  learning_rate=3e-4,
                  policy_delay=2,
                  actor_holdback=20000,
@@ -101,7 +101,7 @@ class SAC_Learner:
                  obs_center=None,
                  obs_spread=None,
                  freeze_alpha=False,
-                 target_entropy=-1.0,
+                 target_entropy=None,
                  min_alpha=None,
                  adam_betas=(0.9, 0.999),
                  num_envs=1,
@@ -158,9 +158,15 @@ class SAC_Learner:
         self.obs_spread = None if obs_spread is None else torch.as_tensor(obs_spread, dtype=torch.float32, device=device)
         self.freeze_alpha = freeze_alpha
 
+        # The reward is divided by 1/(1-γ), so one perfect decision is worth 1-γ.
+        # Starting the temperature there makes one nat of entropy worth the same decision.
+        if alpha is None:
+            alpha = 1.0 - gamma
         self.log_alpha = torch.tensor(math.log(alpha), device=device, requires_grad=True)
         self.alpha_optimizer = optim.Adam([self.log_alpha], lr=self.LR)
-        # Entropy in force units: -1 is about 0.09 N of noise, +0.25 about 0.3 N.
+        # None asks for the entropy of a Gaussian force with a standard deviation of 2 N.
+        if target_entropy is None:
+            target_entropy = 0.5 * math.log(2.0 * math.pi * math.e * 4.0)
         self.target_entropy = target_entropy
         self.min_log_alpha = None if min_alpha is None else math.log(min_alpha)
         self.alpha_steps = 0

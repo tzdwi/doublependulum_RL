@@ -3674,7 +3674,7 @@ def speed_penalty_run(env, gain, protected=False, adam_betas=None, archive_bc=Fa
     elif min_alpha is not None:
         label = "sac target 0.25 floor" if training_seed == 0 else f"sac target 0.25 floor seed {training_seed}"
     elif not freeze_alpha:
-        label = "sac target -1"
+        label = "sac target 2.11"
     else:
         label = "steep speed 2M"
     if run_label is not None:
@@ -3727,7 +3727,7 @@ def speed_penalty_run(env, gain, protected=False, adam_betas=None, archive_bc=Fa
 
 
 def crossq_scaled_run(env, gain, learning_rate=None, adam_betas=None, label=None, num_episodes=8000):
-    """Train CrossQ with reward scale 100 and temperature target -1."""
+    """Train CrossQ with the derived reward scale and a 2 N entropy target."""
     from DoublePendulum.nn.crossQ import CrossQ_Learner
 
     _reseed(0)

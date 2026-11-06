@@ -15,8 +15,6 @@ def main():
     learner = sac.SAC_Learner(
         log_progress=True,
         num_envs=num_envs,
-        alpha=0.0001,
-        freeze_alpha=True,
         buffer_length=2_000_000,
     )
     print(f"Initialized, environments {num_envs}")
