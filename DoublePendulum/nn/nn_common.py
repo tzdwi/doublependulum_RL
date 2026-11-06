@@ -407,21 +407,54 @@ Transition = namedtuple('Transition',
 TransitionSequence = namedtuple('TransitionSequence',
                         ('state', 'action', 'reward'))
 
-# hold transitions in memory
+# A sampled batch is already joined: state and next_state are (batch, obs),
+# action is (batch, act), reward is (batch,), and non_final marks rows with a next state.
+ReplayBatch = namedtuple("ReplayBatch", ("state", "action", "next_state", "reward", "non_final"))
+
+
 class ReplayMemory(object):
+    """Ring buffer of transitions in one tensor block."""
 
     def __init__(self, capacity):
-        self.memory = deque([], maxlen=capacity)
+        self.capacity = int(capacity)
+        self.position = 0
+        self.size = 0
 
-    def push(self, *args):
-        """Save a transition"""
-        self.memory.append(Transition(*args))
+    def push(self, state, action, next_state, reward):
+        if not hasattr(self, "states"):
+            obs = int(state.reshape(-1).numel())
+            act = int(action.reshape(-1).numel())
+            store = state.device
+            self.states = torch.empty(self.capacity, obs, device=store)
+            self.actions = torch.empty(self.capacity, act, device=store)
+            self.rewards = torch.empty(self.capacity, device=store)
+            self.next_states = torch.empty(self.capacity, obs, device=store)
+            self.non_final = torch.empty(self.capacity, dtype=torch.bool, device=store)
+        index = self.position
+        self.states[index] = state.detach().reshape(-1)
+        self.actions[index] = action.detach().reshape(-1)
+        self.rewards[index] = reward.detach().reshape(-1)[0]
+        if next_state is None:
+            self.non_final[index] = False
+        else:
+            self.non_final[index] = True
+            self.next_states[index] = next_state.detach().reshape(-1)
+        self.position = (self.position + 1) % self.capacity
+        self.size = min(self.size + 1, self.capacity)
 
     def sample(self, batch_size):
-        return random.sample(self.memory, batch_size)
+        picks = random.sample(range(self.size), batch_size)
+        index = torch.tensor(picks, device=self.states.device)
+        return ReplayBatch(
+            self.states[index],
+            self.actions[index],
+            self.next_states[index],
+            self.rewards[index],
+            self.non_final[index],
+        )
 
     def __len__(self):
-        return len(self.memory)
+        return self.size
 
 class ExperienceMemory(object):
     def __init__(self, capacity, sequence_length=80, sequence_overlap=40):

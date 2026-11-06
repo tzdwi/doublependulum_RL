@@ -15,7 +15,7 @@ import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
 
-from .nn_common import save_checkpoint, load_checkpoint, this_dir, plot_dir, init_env, device, Transition, ReplayMemory, uniform_warmup_action, EarlyStop, prepare_parallel, run_parallel, _maybe_record, _record_final, _shift_training_seed
+from .nn_common import save_checkpoint, load_checkpoint, this_dir, plot_dir, init_env, device, ReplayMemory, uniform_warmup_action, EarlyStop, prepare_parallel, run_parallel, _maybe_record, _record_final, _shift_training_seed
 
 CQ_policy_pickle = this_dir+"/pickles/crossq_policy_net.pt"
 CQ_Q1_pickle = this_dir+"/pickles/crossq_q1_net.pt"
@@ -282,25 +282,15 @@ class CrossQ_Learner:
         if len(self.memory) < self.BATCH_SIZE:
             return
         # Now sample a batch 
-        transitions = self.memory.sample(self.BATCH_SIZE)
-        # Transpose the batch (see https://stackoverflow.com/a/19343/3343043 for
-        # detailed explanation). This converts batch-array of Transitions
-        # to Transition of batch-arrays.
-        batch = Transition(*zip(*transitions))
-    
-        state_batch = self._condition(torch.cat(batch.state))
-        action_batch = torch.cat(batch.action)
-        reward_batch = torch.cat(batch.reward) / self.reward_scale
-
-        # Compute a mask of non-final states and concatenate the batch elements
-        # (a final state would've been the one after which simulation ended)
-        non_final_mask = torch.tensor(tuple(map(lambda s: s is not None,
-                                              batch.next_state)), device=device, dtype=torch.bool)
+        batch = self.memory.sample(self.BATCH_SIZE)
+        state_batch = self._condition(batch.state)
+        action_batch = batch.action
+        reward_batch = batch.reward / self.reward_scale
+        non_final_mask = batch.non_final
         # Terminal rows use their own start state as a placeholder; zeros would look like upright, still balance.
-        next_state_batch = torch.cat(batch.state).clone()
+        next_state_batch = batch.state.clone()
         if non_final_mask.any():
-            next_state_batch[non_final_mask] = torch.cat([s for s in batch.next_state
-                                                    if s is not None])
+            next_state_batch[non_final_mask] = batch.next_state[non_final_mask]
         next_state_batch = self._condition(next_state_batch)
 
         next_action_batch = torch.zeros(self.BATCH_SIZE, device=device)
