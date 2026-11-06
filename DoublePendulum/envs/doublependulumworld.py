@@ -149,21 +149,17 @@ class DoublePendulumEnv(gym.Env):
         self._agent_location = float(np.clip(force, -self.max_F, self.max_F))
 
     def decision_from_infos(self, infos):
-        # The balance score is averaged so each decision is about 1 while upright.
+        # Factors are averaged over the physics steps of the decision.
         # A fall ends the episode; the five-second success flag is recorded and does not end it.
-        shaping = ["control_penalty", "balance_reward", "speed_penalty", "still_reward"]
-        events = ["failure_penalty", "offtrack_penalty"]
+        shaping = ["shaped_reward", "upright", "stillness", "position_factor", "control_penalty"]
+        events = ["failure_penalty"]
         info = {key: float(np.mean([i[key] for i in infos])) for key in shaping}
         info.update({key: float(sum(i[key] for i in infos)) for key in events})
         info.update({key: any(i[key] for i in infos) for key in ["success", "oob", "offtrack"]})
         terminated = info["failure_penalty"] > 0
-        reward = (
-            info["balance_reward"]
-            + info["still_reward"]
-            - info["control_penalty"]
-            - info["offtrack_penalty"]
-            - info["speed_penalty"]
-        )
+        # Once per decision, so bouncing on the rail cannot pile up across physics steps.
+        info["offtrack_penalty"] = 0.01 if info["offtrack"] else 0.0
+        reward = info["shaped_reward"] - info["offtrack_penalty"]
         return self._clip_obs(self._get_obs()), reward, terminated, info
 
     def step(self, action):
@@ -196,28 +192,21 @@ class DoublePendulumEnv(gym.Env):
 
         theta1_err = _upright_error(self.state[1])
         theta2_err = _upright_error(self.state[2])
-        # Full force costs 1e-5, below the upright change from one decision on this plant.
-        control_penalty = 1e-5 * (self.state[6] / self.max_F) ** 2.0
-        balance_reward = 0.5 * (max(0.0, math.cos(theta1_err)) + max(0.0, math.cos(theta2_err)))
-        # Penalize motion above the same Cartesian speed threshold used for success.
-        # This is continuous in both speed and angle, and capped below the balance reward.
-        max_speed = max(abs(cartesian[3]), math.hypot(*cartesian[4]), math.hypot(*cartesian[5]))
-        speed_excess = max(0.0, max_speed / self._still_speed - 1.0)
-        speed_penalty = 0.5 * speed_excess / (speed_excess + 5.0)
-        # Extra payoff for being upright and slow. About 1 at rest, about 0.5 at 1 m/s, and it keeps a slope at higher speeds.
-        upright = max(0.0, math.cos(theta1_err)) * max(0.0, math.cos(theta2_err))
-        still_reward = upright / (1.0 + (max_speed / 1.0) ** 2)
-        # Marks a fall for termination. The return itself is the balance score that stops arriving.
+        upright = math.exp(-(theta1_err ** 2 + theta2_err ** 2) / (2 * 0.25 ** 2))
+        speed_sq = cartesian[3] ** 2 + math.hypot(*cartesian[4]) ** 2 + math.hypot(*cartesian[5]) ** 2
+        stillness = math.exp(-speed_sq / (2 * 0.3 ** 2))
+        position_factor = 1.0 - 0.1 * (self.state[0] / self.size) ** 2
+        control_penalty = 0.01 * (self.state[6] / self.max_F) ** 2
+        shaped_reward = upright * (0.5 + 0.5 * stillness) * position_factor - control_penalty
         failure_penalty = 0.0 if self._head_is_up() else 1.0
-        offtrack_penalty = 1.0 if offtrack else 0.0
 
         return {
+            "shaped_reward": float(shaped_reward),
+            "upright": float(upright),
+            "stillness": float(stillness),
+            "position_factor": float(position_factor),
             "control_penalty": float(control_penalty),
-            "balance_reward": float(balance_reward),
-            "speed_penalty": float(speed_penalty),
-            "still_reward": float(still_reward),
             "failure_penalty": float(failure_penalty),
-            "offtrack_penalty": float(offtrack_penalty),
             "success": bool(success),
             "oob": bool(oob),
             "offtrack": bool(offtrack),

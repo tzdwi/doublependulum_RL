@@ -41,9 +41,10 @@ from DoublePendulum.nn.nn_common import Transition, device, init_env
 from DoublePendulum.nn.sac import SAC_Learner, SAC_POLICY_DP, SAC_Q_DP
 
 TERMS = [
-    "balance_reward",
-    "speed_penalty",
-    "still_reward",
+    "shaped_reward",
+    "upright",
+    "stillness",
+    "position_factor",
     "control_penalty",
     "offtrack_penalty",
 ]
@@ -4367,7 +4368,7 @@ def _scaled_audit(name, learner, gain, counted, successes, durations):
         while not done:
             observation, _, terminated, truncated, info = probe.step(float(action))
             length += 1
-            penalty_sum += float(info["speed_penalty"])
+            penalty_sum += float(info["stillness"])
             done = terminated or truncated
             physical = wrapped_error(probe.unwrapped.pendulum.x)
             tilt = float(np.max(np.abs(physical[1:3])))
@@ -4443,7 +4444,7 @@ def _scaled_audit(name, learner, gain, counted, successes, durations):
         f"{spread_note}"
         f"upright fraction {np.median(upright_fractions):.3f} "
         f"upright speed/limit {np.nanmedian(upright_speeds):.3f} "
-        f"speed penalty {np.median(speed_penalties):.3f} "
+        f"stillness {np.median(speed_penalties):.3f} "
         f"longest hold {np.median(holds):.2f}s "
         f"median Q {np.median(values):.3f} median dQ/dF {np.median(slopes):.6f} "
         f"toward LQR {toward}/20 "
