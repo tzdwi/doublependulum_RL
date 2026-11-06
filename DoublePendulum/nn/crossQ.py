@@ -15,7 +15,7 @@ import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
 
-from .nn_common import this_dir, plot_dir, init_env, device, Transition, ReplayMemory, warmup_action, EarlyStop, prepare_parallel, run_parallel, LQR_OBS_CENTER, LQR_OBS_SPREAD, _maybe_record, _record_final, _shift_training_seed
+from .nn_common import this_dir, plot_dir, init_env, device, Transition, ReplayMemory, warmup_action, EarlyStop, prepare_parallel, run_parallel, _maybe_record, _record_final, _shift_training_seed
 
 CQ_policy_pickle = this_dir+"/pickles/crossq_policy_net.pt"
 CQ_Q1_pickle = this_dir+"/pickles/crossq_q1_net.pt"
@@ -45,7 +45,7 @@ class CQ_POLICY_DP(nn.Module):
         nn.init.zeros_(self.layer3.weight)
         nn.init.zeros_(self.layer3.bias)
         self.layer3.bias.data[1] = -1.0
-        self.activation = nn.Softplus()
+        self.activation = nn.ReLU()
 
     # Called with either one element to determine next action, or a batch
     # during optimization. Returns tensor([[mean dF, log sigma dF]...]).
@@ -55,6 +55,49 @@ class CQ_POLICY_DP(nn.Module):
         return self.layer3(x)
 
  
+class BatchRenorm1d(nn.Module):
+    """Batch renormalization, as used by CrossQ.
+
+    For the first warmup_steps forwards this is ordinary batch-norm, so the running
+    averages have something to track. After that, a forward in train mode normalizes
+    with the running averages, clipped toward the current batch. A forward in eval
+    mode uses the running averages exactly and does not update them.
+    """
+
+    def __init__(self, num_features, eps=0.001, momentum=0.01, warmup_steps=5000):
+        super().__init__()
+        self.eps = eps
+        self.momentum = momentum
+        self.warmup_steps = warmup_steps
+        self.rmax = 3.0
+        self.dmax = 5.0
+        self.register_buffer("ra_mean", torch.zeros(num_features))
+        self.register_buffer("ra_var", torch.ones(num_features))
+        self.register_buffer("steps", torch.zeros((), dtype=torch.long))
+        self.weight = nn.Parameter(torch.ones(num_features))
+        self.bias = nn.Parameter(torch.zeros(num_features))
+
+    def forward(self, x):
+        if self.training:
+            batch_mean = x.mean(dim=0)
+            batch_var = x.var(dim=0, unbiased=False)
+            if int(self.steps) > self.warmup_steps:
+                batch_std = (batch_var + self.eps).sqrt()
+                running_std = (self.ra_var + self.eps).sqrt()
+                r = (batch_std / running_std).detach().clamp(1 / self.rmax, self.rmax)
+                d = ((batch_mean - self.ra_mean) / running_std).detach().clamp(-self.dmax, self.dmax)
+                normalized = (x - batch_mean) / batch_std * r + d
+            else:
+                normalized = (x - batch_mean) / (batch_var + self.eps).sqrt()
+            with torch.no_grad():
+                self.ra_mean.add_(self.momentum * (batch_mean.detach() - self.ra_mean))
+                self.ra_var.add_(self.momentum * (batch_var.detach() - self.ra_var))
+                self.steps += 1
+        else:
+            normalized = (x - self.ra_mean) / (self.ra_var + self.eps).sqrt()
+        return self.weight * normalized + self.bias
+
+
 class CQ_Q_DP(nn.Module):
     """
     Our goal is to learn a function Q*(s, a) to estimate the reward of
@@ -69,15 +112,15 @@ class CQ_Q_DP(nn.Module):
         # We're also training a _wide_ network here!
         self.layer1 = nn.Linear(n_observations+1, 1024)
         # We also add batch normalization between layers
-        self.norm1 = nn.BatchNorm1d(
+        self.norm1 = BatchRenorm1d(
             num_features=1024,
             momentum=0.01, #equiv to 0.99 in CrossQ paper
             eps=0.001
             )
         self.layer2 = nn.Linear(1024, 1024)
-        self.norm2 = nn.BatchNorm1d(
+        self.norm2 = BatchRenorm1d(
             num_features=1024,
-            momentum=0.01,
+            momentum=0.01, #equiv to 0.99 in CrossQ paper
             eps=0.001
             )
         self.layer3 = nn.Linear(1024, 1)
@@ -112,9 +155,10 @@ class CrossQ_Learner:
                  policy_delay=3,
                  actor_holdback=20000,
                  log_progress=False,
-                 obs_center=LQR_OBS_CENTER,
-                 obs_spread=LQR_OBS_SPREAD,
+                 obs_center=None,
+                 obs_spread=None,
                  reward_scale=100.0,
+                 adam_betas=(0.5, 0.999),
                  num_envs=1):
 
         self.env = init_env(size=size,
@@ -178,11 +222,12 @@ class CrossQ_Learner:
         
         # Optimizers use LR=10^-3 by default
         # and Beta1=0.5
+        self.adam_betas = adam_betas
         self.Q_optimizer = optim.AdamW([{"params":self.Q_net_1.parameters()},
                                        {"params":self.Q_net_2.parameters()}],
-                                       lr=self.LR, betas=(0.5, 0.999), amsgrad=True)
+                                       lr=self.LR, betas=adam_betas, amsgrad=True)
         self.policy_optimizer = optim.AdamW(self.policy_net.parameters(), 
-                                            lr=self.LR, betas=(0.5, 0.999), amsgrad=True)
+                                            lr=self.LR, betas=adam_betas, amsgrad=True)
         # Mean squared error loss
         self.criterion = nn.MSELoss()
         self.memory = ReplayMemory(int(buffer_length))
@@ -247,7 +292,8 @@ class CrossQ_Learner:
         # (a final state would've been the one after which simulation ended)
         non_final_mask = torch.tensor(tuple(map(lambda s: s is not None,
                                               batch.next_state)), device=device, dtype=torch.bool)
-        next_state_batch = torch.zeros((self.BATCH_SIZE, len(self.state)),device=device)
+        # Terminal rows use their own start state as a placeholder; zeros would look like upright, still balance.
+        next_state_batch = torch.cat(batch.state).clone()
         if non_final_mask.any():
             next_state_batch[non_final_mask] = torch.cat([s for s in batch.next_state
                                                     if s is not None])
@@ -304,47 +350,60 @@ class CrossQ_Learner:
         self.Q_optimizer.step()
 
         if do_policy_step:
-            # switch batch norms to learned values
-            self.Q_net_1.eval()
-            self.Q_net_2.eval()
-            # Now gradient ascend the policy_net parameters
-            next_action_mus, next_action_logsigmas = self.policy_net(state_batch).chunk(2, dim=-1)
-            next_action_logsigmas = next_action_logsigmas.clamp(-20, 2)
-            dists = torch.distributions.Normal(next_action_mus, torch.exp(next_action_logsigmas))
-            u = dists.rsample()
-            next_action_values = self.scale*F.tanh(u)
-            # again, logprob defined in appC here: https://arxiv.org/pdf/1801.01290
-            logprobs = (dists.log_prob(u) - torch.log(1.0-torch.pow(F.tanh(u),2.0)+1e-12)-math.log(self.scale)).squeeze(-1)
-            Q_in = torch.cat((state_batch, next_action_values / self.scale), dim=-1)
-            # each Q net returns Bx1, so we want to stack along the last dim
-            Qs = torch.cat([Q_net(Q_in) for Q_net in [self.Q_net_1, self.Q_net_2]], dim=-1)
-            selected = torch.min(Qs, dim=-1).values
-            if getattr(self, "actor_probe", None) is not None:
-                action_grad = torch.autograd.grad(selected.sum(), next_action_values, retain_graph=True)[0]
-                forces = next_action_values.detach()
-                slope = action_grad.detach()
-                self.actor_probe.append((
-                    float(forces.std()),
-                    float(forces.mean()),
-                    float(selected.detach().std()),
-                    float(slope.abs().mean()),
-                    float((slope * forces.sign()).mean()),
-                ))
-            # we want gradient _ascent_ so we use the negative of the sum of action values
-            loss = -(selected-self.log_alpha.exp().detach()*logprobs).sum()/self.BATCH_SIZE
-            self.policy_optimizer.zero_grad()
-            loss.backward()
-            # In-place gradient clipping
-            torch.nn.utils.clip_grad_value_(self.policy_net.parameters(), 100)
-            self.policy_optimizer.step()
+            # After the warm-up, score the policy with the running averages from the critic update.
+            norms = [module for net in (self.Q_net_1, self.Q_net_2) for module in net.modules() if isinstance(module, BatchRenorm1d)]
+            warmed = all(int(module.steps) > module.warmup_steps for module in norms)
+            saved_stats = None
+            if warmed:
+                for module in norms:
+                    module.eval()
+            else:
+                saved_stats = [(module.ra_mean.clone(), module.ra_var.clone(), module.steps.clone()) for module in norms]
+            try:
+                # Now gradient ascend the policy_net parameters
+                next_action_mus, next_action_logsigmas = self.policy_net(state_batch).chunk(2, dim=-1)
+                next_action_logsigmas = next_action_logsigmas.clamp(-20, 2)
+                dists = torch.distributions.Normal(next_action_mus, torch.exp(next_action_logsigmas))
+                u = dists.rsample()
+                next_action_values = self.scale*F.tanh(u)
+                # again, logprob defined in appC here: https://arxiv.org/pdf/1801.01290
+                logprobs = (dists.log_prob(u) - torch.log(1.0-torch.pow(F.tanh(u),2.0)+1e-12)-math.log(self.scale)).squeeze(-1)
+                Q_in = torch.cat((state_batch, next_action_values / self.scale), dim=-1)
+                # each Q net returns Bx1, so we want to stack along the last dim
+                Qs = torch.cat([Q_net(Q_in) for Q_net in [self.Q_net_1, self.Q_net_2]], dim=-1)
+                selected = torch.min(Qs, dim=-1).values
+                if getattr(self, "actor_probe", None) is not None:
+                    action_grad = torch.autograd.grad(selected.sum(), next_action_values, retain_graph=True)[0]
+                    forces = next_action_values.detach()
+                    slope = action_grad.detach()
+                    self.actor_probe.append((
+                        float(forces.std()),
+                        float(forces.mean()),
+                        float(selected.detach().std()),
+                        float(slope.abs().mean()),
+                        float((slope * forces.sign()).mean()),
+                    ))
+                # we want gradient _ascent_ so we use the negative of the sum of action values
+                loss = -(selected-self.log_alpha.exp().detach()*logprobs).sum()/self.BATCH_SIZE
+                self.policy_optimizer.zero_grad()
+                loss.backward()
+                # In-place gradient clipping
+                torch.nn.utils.clip_grad_value_(self.policy_net.parameters(), 100)
+                self.policy_optimizer.step()
 
-            alpha_loss = -(self.log_alpha * (logprobs.detach() + self.target_entropy)).mean()
-            self.alpha_optimizer.zero_grad()
-            alpha_loss.backward()
-            self.alpha_optimizer.step()
-            # switch batch norms back to training
-            self.Q_net_1.train()
-            self.Q_net_2.train()
+                alpha_loss = -(self.log_alpha * (logprobs.detach() + self.target_entropy)).mean()
+                self.alpha_optimizer.zero_grad()
+                alpha_loss.backward()
+                self.alpha_optimizer.step()
+            finally:
+                if warmed:
+                    for module in norms:
+                        module.train()
+                else:
+                    for module, (mean, var, steps) in zip(norms, saved_stats):
+                        module.ra_mean.copy_(mean)
+                        module.ra_var.copy_(var)
+                        module.steps.copy_(steps)
         torch.cuda.empty_cache()
 
     def _actor_started(self):
@@ -423,8 +482,6 @@ class CrossQ_Learner:
                     stop = early.check(
                         self.episode_durations, self.final_state_balanced,
                         self.steps_done > self.start_steps + self.actor_holdback)
-                    if early.improved or (stop or "").startswith("solved"):
-                        self.dump_best(len(self.episode_durations), early.best)
                     break
             if stop:
                 print(stop)

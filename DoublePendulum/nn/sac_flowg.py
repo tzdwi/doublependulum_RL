@@ -16,7 +16,7 @@ import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
 
-from .nn_common import this_dir, plot_dir, init_env, device, Transition, ReplayMemory, warmup_action, EarlyStop, polyak_update, prepare_parallel, run_parallel, LQR_OBS_CENTER, LQR_OBS_SPREAD, _maybe_record, _record_final, _shift_training_seed
+from .nn_common import this_dir, plot_dir, init_env, device, Transition, ReplayMemory, warmup_action, EarlyStop, polyak_update, prepare_parallel, run_parallel, _maybe_record, _record_final, _shift_training_seed
 from .sac import SAC_Q_DP
 
 SAC_G_velocity_pickle = this_dir+"/pickles/sac_flowg_velocity_net.pt"
@@ -170,8 +170,8 @@ class SAC_FLOWG_Learner:
 				 start_steps=2000,
 				 buffer_length=1e6,
 				 log_progress=False,
-				 obs_center=LQR_OBS_CENTER,
-				 obs_spread=LQR_OBS_SPREAD,
+				 obs_center=None,
+				 obs_spread=None,
 				 reward_scale=1.0,
 				 freeze_alpha=False,
 				 adam_betas=(0.9, 0.999),
@@ -463,8 +463,6 @@ class SAC_FLOWG_Learner:
 					stop = early.check(
 						self.episode_durations, self.final_state_balanced,
 						self.steps_done > self.start_steps + self.actor_holdback)
-					if early.improved or (stop or "").startswith("solved"):
-						self.dump_best(len(self.episode_durations), early.best)
 					break
 			if stop:
 				print(stop)

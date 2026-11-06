@@ -12,7 +12,14 @@ def main():
     from DoublePendulum.nn import sac
     print("Imported!")
 
-    learner = sac.SAC_Learner(log_progress=True, num_envs=num_envs)
+    learner = sac.SAC_Learner(
+        log_progress=True,
+        num_envs=num_envs,
+        alpha=0.0001,
+        freeze_alpha=True,
+        reward_scale=100.0,
+        buffer_length=2_000_000,
+    )
     print(f"Initialized, environments {num_envs}")
 
     try:

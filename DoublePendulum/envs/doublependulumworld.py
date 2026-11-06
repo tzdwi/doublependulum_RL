@@ -59,7 +59,7 @@ class DoublePendulumEnv(gym.Env):
             [self.size, 5*np.pi, 5*np.pi, self.max_cart_vel, self.max_ang_vel, 10*(self.m2/self.m1)*self.max_ang_vel, self.max_F], dtype=np.float64
         )
         self._state_low = -self._state_high
-        self.observation_space = spaces.Box(-1.0, 1.0, shape=(7,), dtype=np.float32)
+        self.observation_space = spaces.Box(-5.0, 5.0, shape=(8,), dtype=np.float32)
 
         # action is the applied force over that timestep
         self.action_space = spaces.Box(-max_F, max_F, shape=(1,))
@@ -88,24 +88,20 @@ class DoublePendulumEnv(gym.Env):
         return state
 
     def _get_obs(self):
-        # now lets scale our raw state into a helpful observation
-        # that is bounded in all dimensions to -1, 1
-        # cart pos scaled to rail size
-        # thetas wrapped around pi, scaled by pi/4
-        # cart velocity relative to the speed scale defined by the physics
-        # angular velocities scaled by pi
-        # foce relative to the max
+        # Fixed physical scales, so a typical in-range value is about 1.
+        # Clipping at +/-5 happens last, and a fall (0.8 rad) arrives before any angle clips.
         state = self._get_state()
-        quarter_turn = math.pi / 4
+        cartesian = self.pendulum.transform_cartesian(do_vels=True)
         obs = np.array(
             [
                 state[0] / self.size,
-                _upright_error(state[1]) / quarter_turn,
-                _upright_error(state[2]) / quarter_turn,
-                state[3] / self.speed_scale,
-                state[4] / math.pi,
-                state[5] / math.pi,
-                state[6] / self.max_F,
+                _upright_error(state[1]) / 0.5,
+                _upright_error(state[2]) / 0.5,
+                state[3] / 2.0,
+                state[4] / 0.5,
+                state[5] / 0.5,
+                cartesian[4][0] / 1.0,
+                cartesian[5][0] / 1.0,
             ],
             dtype=np.float32,
         )
@@ -155,7 +151,7 @@ class DoublePendulumEnv(gym.Env):
     def decision_from_infos(self, infos):
         # The balance score is averaged so each decision is about 1 while upright.
         # A fall ends the episode; the five-second success flag is recorded and does not end it.
-        shaping = ["control_penalty", "balance_reward", "tilt_rate", "speed_penalty"]
+        shaping = ["control_penalty", "balance_reward", "tilt_rate", "speed_penalty", "still_reward"]
         events = ["failure_penalty", "offtrack_penalty"]
         info = {key: float(np.mean([i[key] for i in infos])) for key in shaping}
         info.update({key: float(sum(i[key] for i in infos)) for key in events})
@@ -163,6 +159,7 @@ class DoublePendulumEnv(gym.Env):
         terminated = info["failure_penalty"] > 0
         reward = (
             info["balance_reward"]
+            + info["still_reward"]
             - info["control_penalty"]
             - info["offtrack_penalty"]
             - info["tilt_rate"]
@@ -211,8 +208,11 @@ class DoublePendulumEnv(gym.Env):
         max_speed = max(abs(cartesian[3]), math.hypot(*cartesian[4]), math.hypot(*cartesian[5]))
         speed_excess = max(0.0, max_speed / self._still_speed - 1.0)
         speed_penalty = 0.5 * speed_excess / (speed_excess + 5.0)
+        # Extra payoff for being upright and slow. About 1 at rest, about 0.5 at 1 m/s, and it keeps a slope at higher speeds.
+        upright = max(0.0, math.cos(theta1_err)) * max(0.0, math.cos(theta2_err))
+        still_reward = upright / (1.0 + (max_speed / 1.0) ** 2)
         # Marks a fall for termination. The return itself is the balance score that stops arriving.
-        failure_penalty = 0.0 if self._head_is_up(cartesian) else 1.0
+        failure_penalty = 0.0 if self._head_is_up() else 1.0
         offtrack_penalty = 1.0 if offtrack else 0.0
 
         return {
@@ -220,6 +220,7 @@ class DoublePendulumEnv(gym.Env):
             "balance_reward": float(balance_reward),
             "tilt_rate": float(tilt_rate),
             "speed_penalty": float(speed_penalty),
+            "still_reward": float(still_reward),
             "failure_penalty": float(failure_penalty),
             "offtrack_penalty": float(offtrack_penalty),
             "success": bool(success),
@@ -229,13 +230,15 @@ class DoublePendulumEnv(gym.Env):
     
     @property
     def healthy(self):
-        # We're healthy if the second head is above the first
-        # and both are above 0.5 * l1
-        return self._head_is_up(self.pendulum.transform_cartesian(do_vels=True))
+        return self._head_is_up()
 
-    def _head_is_up(self, cartesian):
-        y2 = cartesian[2][1] / (self.l1 + self.l2) / 0.3 # originally, each pole was 0.6
-        return y2 >= 1
+    def _head_is_up(self):
+        # A fall is either pole more than 0.8 rad from upright.
+        limit = 0.8
+        return (
+            abs(_upright_error(self.state[1])) <= limit
+            and abs(_upright_error(self.state[2])) <= limit
+        )
 
     def _distance(self):
         raw_dist = self.state[1:6] - self._target_loc

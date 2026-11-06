@@ -15,7 +15,7 @@ import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
 
-from .nn_common import this_dir, plot_dir, init_env, device, Transition, ReplayMemory, warmup_action, EarlyStop, polyak_update, prepare_parallel, run_parallel, LQR_OBS_CENTER, LQR_OBS_SPREAD, _maybe_record, _record_final, _shift_training_seed
+from .nn_common import this_dir, plot_dir, init_env, device, Transition, ReplayMemory, warmup_action, EarlyStop, polyak_update, prepare_parallel, run_parallel, _maybe_record, _record_final, _shift_training_seed
 
 SAC_policy_pickle = this_dir+"/pickles/sac_policy_net.pt"
 SAC_Q1_pickle = this_dir+"/pickles/sac_q1_net.pt"
@@ -45,7 +45,7 @@ class SAC_POLICY_DP(nn.Module):
         nn.init.zeros_(self.layer3.weight)
         nn.init.zeros_(self.layer3.bias)
         self.layer3.bias.data[1] = -1.0
-        self.activation = nn.Softplus()
+        self.activation = nn.ReLU()
 
     # Called with either one element to determine next action, or a batch
     # during optimization. Returns tensor([[mean dF, log sigma dF]...]).
@@ -66,7 +66,7 @@ class SAC_Q_DP(nn.Module):
         self.layer1 = nn.Linear(n_observations+1, 128)
         self.layer2 = nn.Linear(128, 128)
         self.layer3 = nn.Linear(128, 1)
-        self.activation = nn.Softplus()
+        self.activation = nn.ReLU()
 
     # Called with either one element to determine next action's reward
     # or a batch during optimization. Returns tensor([[reward]...]).
@@ -98,10 +98,12 @@ class SAC_Learner:
                  start_steps=2000,
                  buffer_length=1e6,
                  log_progress=False,
-                 obs_center=LQR_OBS_CENTER,
-                 obs_spread=LQR_OBS_SPREAD,
+                 obs_center=None,
+                 obs_spread=None,
                  reward_scale=1.0,
                  freeze_alpha=False,
+                 target_entropy=-1.0,
+                 min_alpha=None,
                  adam_betas=(0.9, 0.999),
                  num_envs=1,
                  archive_bc=False):
@@ -158,8 +160,11 @@ class SAC_Learner:
 
         self.log_alpha = torch.tensor(math.log(alpha), device=device, requires_grad=True)
         self.alpha_optimizer = optim.Adam([self.log_alpha], lr=self.LR)
-        # One nat of randomness in force units.
-        self.target_entropy = -1.0
+        # Entropy in force units: -1 is about 0.09 N of noise, +0.25 about 0.3 N.
+        self.target_entropy = target_entropy
+        self.min_log_alpha = None if min_alpha is None else math.log(min_alpha)
+        self.alpha_steps = 0
+        self.alpha_floor_hits = torch.zeros((), device=device)
 
         # Net to predict the next action
         self.policy_net = SAC_POLICY_DP(n_observations).to(device)
@@ -335,6 +340,11 @@ class SAC_Learner:
         self.alpha_optimizer.zero_grad()
         alpha_loss.backward()
         self.alpha_optimizer.step()
+        if self.min_log_alpha is not None:
+            self.alpha_steps += 1
+            with torch.no_grad():
+                self.alpha_floor_hits += self.log_alpha.detach().lt(self.min_log_alpha)
+                self.log_alpha.clamp_(min=self.min_log_alpha)
 
     def _squashed_log_prob(self, states, forces):
         action_mu, action_logsig = self.policy_net(states).chunk(2, dim=-1)
@@ -442,8 +452,6 @@ class SAC_Learner:
                     stop = early.check(
                         self.episode_durations, self.final_state_balanced,
                         self.steps_done > self.start_steps + self.actor_holdback)
-                    if early.improved or (stop or "").startswith("solved"):
-                        self.dump_best(len(self.episode_durations), early.best)
                     break
             if stop:
                 print(stop)

@@ -15,7 +15,7 @@ import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
 
-from .nn_common import this_dir, plot_dir, init_env, device, Transition, ReplayMemory, warmup_action, EarlyStop, polyak_update, prepare_parallel, run_parallel, LQR_OBS_CENTER, LQR_OBS_SPREAD, _maybe_record, _record_final, _shift_training_seed
+from .nn_common import this_dir, plot_dir, init_env, device, Transition, ReplayMemory, warmup_action, EarlyStop, polyak_update, prepare_parallel, run_parallel, _maybe_record, _record_final, _shift_training_seed
 
 DDPG_policy_pickle = this_dir+"/pickles/ddpg_policy_net.pt"
 DDPG_Q_pickle = this_dir+"/pickles/ddpg_q_net.pt"
@@ -41,7 +41,7 @@ class DDPG_POLICY_DP(nn.Module):
         self.layer3 = nn.Linear(128, 1)
         nn.init.zeros_(self.layer3.weight)
         nn.init.zeros_(self.layer3.bias)
-        self.activation = nn.Softplus()
+        self.activation = nn.ReLU()
         self.scale = scale
 
     # Called with either one element to determine next action, or a batch
@@ -62,7 +62,7 @@ class DDPG_Q_DP(nn.Module):
         self.layer1 = nn.Linear(n_observations+1, 128)
         self.layer2 = nn.Linear(128, 128)
         self.layer3 = nn.Linear(128, 1)
-        self.activation = nn.Softplus()
+        self.activation = nn.ReLU()
 
     # Called with either one element to determine next action, or a batch
     # during optimization. Returns tensor([[dF]...]).
@@ -92,8 +92,8 @@ class DDPG_Learner:
                  start_steps=2000,
                  buffer_length=1e6,
                  log_progress=False,
-                 obs_center=LQR_OBS_CENTER,
-                 obs_spread=LQR_OBS_SPREAD,
+                 obs_center=None,
+                 obs_spread=None,
                  reward_scale=100.0,
                  num_envs=1):
 
@@ -353,8 +353,6 @@ class DDPG_Learner:
                     stop = early.check(
                         self.episode_durations, self.final_state_balanced,
                         self.steps_done > self.start_steps + self.actor_holdback)
-                    if early.improved or (stop or "").startswith("solved"):
-                        self.dump_best(len(self.episode_durations), early.best)
                     break
             if stop:
                 print(stop)

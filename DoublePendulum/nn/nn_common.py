@@ -13,15 +13,6 @@ from pathlib import Path
 
 from .. import max_seconds
 
-LQR_OBS_CENTER = np.array(
-    [-0.003775, -0.000005, -0.000004, -0.000054, -0.000008, -0.000008, 0.000013],
-    dtype=np.float32,
-)
-LQR_OBS_SPREAD = np.array(
-    [0.046247, 0.004228, 0.003751, 0.049730, 0.000835, 0.000408, 0.017284],
-    dtype=np.float32,
-)
-
 # Distribution checks synchronize the GPU on every sample. The policy already
 # clamps its standard deviation, so skip the checks during training.
 torch.distributions.Distribution.set_default_validate_args(False)
@@ -142,8 +133,6 @@ def run_parallel(learner, num_episodes, start_episode, choose_actions, on_step, 
                         learner.final_state_balanced,
                         actor_started(),
                     )
-                    if early.improved or (stop or "").startswith("solved"):
-                        learner.dump_best(len(learner.episode_durations), early.best)
                     new_episodes += 1
                     if bar is not None:
                         bar.update(1)
@@ -292,11 +281,20 @@ def record_policy_video(learner, seeds, episode_number):
             decisions += 1
     finally:
         writer.close()
+    plants = [env.unwrapped for env in envs]
+    return sum(
+        1 for i, plant in enumerate(plants)
+        if active[i] and plant.success_frames * plant.dt >= plant.SUCCESS_TIME
+    )
 
 
 def _maybe_record(learner, episode_index):
     if learner.log_env and episode_index > 0 and episode_index % 250 == 0:
-        record_policy_video(learner, HOLDOUT_SEEDS, episode_index)
+        score = record_policy_video(learner, HOLDOUT_SEEDS, episode_index)
+        print(f"held-out {score}/{len(HOLDOUT_SEEDS)} at episode {episode_index}")
+        if score > getattr(learner, "holdout_best", -1):
+            learner.holdout_best = score
+            learner.dump_best(episode_index, None)
 
 
 def _record_final(learner):

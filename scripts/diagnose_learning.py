@@ -44,6 +44,7 @@ TERMS = [
     "balance_reward",
     "tilt_rate",
     "speed_penalty",
+    "still_reward",
     "control_penalty",
     "offtrack_penalty",
 ]
@@ -258,7 +259,7 @@ def force_grid(env, gain):
         observation, first_reward, terminated, truncated, first_info = env.step(force)
         error = wrapped_error(env.unwrapped.pendulum.x)
         raw = env.unwrapped.pendulum.x
-        names = ("x", "e1", "e2", "vx", "w1", "w2", "F")
+        names = ("x", "e1", "e2", "vx", "w1", "w2", "vx1", "vx2")
         obs_text = " ".join(f"{name}={float(value):+.4f}" for name, value in zip(names, observation))
         clipped = [name for name, value in zip(names, observation) if abs(float(value)) >= 1.0 - 1e-6]
         rest = 0.0
@@ -301,7 +302,7 @@ def critic_fit(env, gain):
             reward_sum, success = episode_from(env, state, force, gain)
             rows.append((observation, force, reward_sum, success))
     torch.manual_seed(0)
-    net = SAC_Q_DP(7).to(device)
+    net = SAC_Q_DP(8).to(device)
     optimizer = optim.AdamW(net.parameters(), lr=3e-4)
     observations = torch.tensor(np.stack([row[0] for row in rows]), dtype=torch.float32, device=device)
     scale = float(env.unwrapped.max_F)
@@ -620,7 +621,7 @@ def critic_td_stored(env, gain, opening_only=False):
         bootstrap = boot_mask * gamma_powers[-1] * learner.GAMMA * torch.min(scores, dim=-1).values
         fixed_targets = ((reward_span * gamma_powers).sum(dim=-1) + bootstrap).detach()
     torch.manual_seed(0)
-    fresh = SAC_Q_DP(7).to(device)
+    fresh = SAC_Q_DP(8).to(device)
     fresh_optimizer = optim.AdamW(fresh.parameters(), lr=3e-4)
     q_in = torch.cat((states, actions / learner.scale), dim=-1)
     loss_fn = nn.MSELoss()
@@ -793,7 +794,7 @@ def critic_td_stored(env, gain, opening_only=False):
                 f"w2 obs {w2:+7.4f} ({w2 * 180:+7.2f} deg/s)"
             )
 
-    names = ("x", "e1", "e2", "vx", "w1", "w2", "F")
+    names = ("x", "e1", "e2", "vx", "w1", "w2", "vx1", "vx2")
     fall = saved[-25.0][16]
     balance = saved[25.0][16]
     print("channel swap at decision 16: balance state, one fall channel, balance action")
@@ -3530,7 +3531,7 @@ def behavior_backup_audit(env, gain):
         feature_t = torch.tensor(features, dtype=torch.float32, device=device)
         target_t = torch.tensor(targets.reshape(-1) / (target_scale if standardized else 1.0), dtype=torch.float32, device=device)
         torch.manual_seed(0)
-        nets = [SAC_Q_DP(7).to(device) for _ in range(2)]
+        nets = [SAC_Q_DP(8).to(device) for _ in range(2)]
         optimizer = optim.AdamW(
             [parameter for net in nets for parameter in net.parameters()],
             lr=3e-4, amsgrad=True,
@@ -3605,31 +3606,9 @@ def _paired_q(learner, observations, forces):
 
 
 def scaled_sac(env, gain, freeze_alpha=False):
-    """Train SAC with LQR input scaling and rewards divided by 100."""
-    observations = []
-    for seed in range(20):
-        observation, _ = env.reset(seed=seed)
-        done = False
-        while not done:
-            observations.append(np.asarray(observation, dtype=np.float64))
-            observation, _, terminated, truncated, _ = env.step(lqr_force(env, gain))
-            done = terminated or truncated
-    columns = np.vstack(observations)
-    center = torch.tensor(columns.mean(axis=0), dtype=torch.float32, device=device)
-    spread = torch.tensor(np.maximum(columns.std(axis=0), 1e-8), dtype=torch.float32, device=device)
-    print(
-        "observation center " + " ".join(f"{value:.6f}" for value in center.tolist()),
-        flush=True,
-    )
-    print(
-        "observation spread " + " ".join(f"{value:.6f}" for value in spread.tolist()),
-        flush=True,
-    )
-
+    """Train SAC on the environment's own observation scales, with rewards divided by 100."""
     def build():
-        return SAC_Learner(
-            obs_center=center, obs_spread=spread, reward_scale=100.0, freeze_alpha=freeze_alpha,
-        )
+        return SAC_Learner(reward_scale=100.0, freeze_alpha=freeze_alpha)
 
     label = "fixed-alpha SAC" if freeze_alpha else "scaled SAC"
     library_outcome(label, build, trace=True, gain=gain)
@@ -3678,22 +3657,11 @@ class ProtectedReplay:
 
 
 def speed_penalty_run(env, gain, protected=False, adam_betas=None, archive_bc=False, alpha=None,
-                      freeze_alpha=True):
+                      freeze_alpha=True, target_entropy=None, min_alpha=None, training_seed=0,
+                      num_episodes=8000, run_label=None):
     """Train scaled SAC for up to 8000 episodes and audit every 100."""
-    observations = []
-    for seed in range(20):
-        observation, _ = env.reset(seed=seed)
-        done = False
-        while not done:
-            observations.append(np.asarray(observation, dtype=np.float64))
-            observation, _, terminated, truncated, _ = env.step(lqr_force(env, gain))
-            done = terminated or truncated
-    columns = np.vstack(observations)
-    center = torch.tensor(columns.mean(axis=0), dtype=torch.float32, device=device)
-    spread = torch.tensor(np.maximum(columns.std(axis=0), 1e-8), dtype=torch.float32, device=device)
-    print("observation center " + " ".join(f"{value:.6f}" for value in center.tolist()), flush=True)
-    print("observation spread " + " ".join(f"{value:.6f}" for value in spread.tolist()), flush=True)
-    _reseed(0)
+    print("observation uses the environment scales", flush=True)
+    _reseed(training_seed)
     library_outcome.best = None
     if protected and archive_bc:
         label = "protected bc"
@@ -3703,23 +3671,27 @@ def speed_penalty_run(env, gain, protected=False, adam_betas=None, archive_bc=Fa
         label = "protected replay"
     elif adam_betas is not None:
         label = "tuned adam"
+    elif min_alpha is not None:
+        label = "sac target 0.25 floor" if training_seed == 0 else f"sac target 0.25 floor seed {training_seed}"
     elif not freeze_alpha:
         label = "sac target -1"
     else:
         label = "steep speed 2M"
+    if run_label is not None:
+        label = run_label
     learner = SAC_Learner(
-        obs_center=center,
-        obs_spread=spread,
         reward_scale=100.0,
         freeze_alpha=freeze_alpha,
         buffer_length=1_800_000 if protected else 2_000_000,
         adam_betas=adam_betas if adam_betas is not None else (0.9, 0.999),
         archive_bc=bool(protected and archive_bc),
         **({} if alpha is None else {"alpha": alpha}),
+        **({} if target_entropy is None else {"target_entropy": target_entropy}),
+        min_alpha=min_alpha,
     )
     print(
         f"entropy weight {learner.log_alpha.exp().item():.6f} "
-        f"target entropy {learner.target_entropy:.3f}",
+        f"target entropy {learner.target_entropy:.3f} training seed {training_seed}",
         flush=True,
     )
     if adam_betas is not None:
@@ -3735,7 +3707,7 @@ def speed_penalty_run(env, gain, protected=False, adam_betas=None, archive_bc=Fa
         if archive_bc:
             print("archive bc on", flush=True)
     learner.dump_best = lambda *args, **kwargs: None
-    _audited_train(learner, gain, label, 8000, 0, lambda *args: None)
+    _audited_train(learner, gain, label, num_episodes, 0, lambda *args: None)
     successes = learner.final_state_balanced
     print(
         f"{label} finished episodes {len(learner.episode_durations)} "
@@ -3755,30 +3727,30 @@ def speed_penalty_run(env, gain, protected=False, adam_betas=None, archive_bc=Fa
         torch.cuda.empty_cache()
 
 
-def crossq_scaled_run(env, gain):
+def crossq_scaled_run(env, gain, learning_rate=None, adam_betas=None, label=None, num_episodes=8000):
     """Train CrossQ with reward scale 100 and temperature target -1."""
     from DoublePendulum.nn.crossQ import CrossQ_Learner
 
     _reseed(0)
     library_outcome.best = None
-    learner = CrossQ_Learner(reward_scale=100.0)
-    print(
-        "observation center " + " ".join(f"{value:.6f}" for value in learner.obs_center.tolist()),
-        flush=True,
+    learner = CrossQ_Learner(
+        reward_scale=100.0,
+        **({} if learning_rate is None else {"learning_rate": learning_rate}),
+        **({} if adam_betas is None else {"adam_betas": adam_betas}),
     )
-    print(
-        "observation spread " + " ".join(f"{value:.6f}" for value in learner.obs_spread.tolist()),
-        flush=True,
-    )
+    print("observation uses the environment scales", flush=True)
     print(
         f"reward scale {learner.reward_scale:g} buffer {learner.memory.memory.maxlen} "
         f"entropy weight {learner.log_alpha.exp().item():.6f} "
-        f"target entropy {learner.target_entropy:.3f}",
+        f"target entropy {learner.target_entropy:.3f} "
+        f"learning rate {learner.LR:g} adam betas {learner.adam_betas[0]:g} {learner.adam_betas[1]:g} "
+        f"renorm warmup {learner.Q_net_1.norm1.warmup_steps}",
         flush=True,
     )
     learner.dump_best = lambda *args, **kwargs: None
-    label = "scaled crossq"
-    _audited_train(learner, gain, label, 8000, 0, lambda *args: None)
+    if label is None:
+        label = "crossq slow adam" if learning_rate is not None or adam_betas is not None else "crossq batch renorm"
+    _audited_train(learner, gain, label, num_episodes, 0, lambda *args: None)
     successes = learner.final_state_balanced
     print(
         f"{label} finished episodes {len(learner.episode_durations)} "
@@ -3798,28 +3770,20 @@ def crossq_scaled_run(env, gain):
         torch.cuda.empty_cache()
 
 
-def ddpg_scaled_run(env, gain):
+def ddpg_scaled_run(env, gain, label="scaled ddpg", num_episodes=8000, on_audit=None):
     """Train DDPG with reward scale 100 and audit its critic slope."""
     from DoublePendulum.nn.ddpg import DDPG_Learner
 
     _reseed(0)
     library_outcome.best = None
     learner = DDPG_Learner(reward_scale=100.0)
-    print(
-        "observation center " + " ".join(f"{value:.6f}" for value in learner.obs_center.tolist()),
-        flush=True,
-    )
-    print(
-        "observation spread " + " ".join(f"{value:.6f}" for value in learner.obs_spread.tolist()),
-        flush=True,
-    )
+    print("observation uses the environment scales", flush=True)
     print(
         f"reward scale {learner.reward_scale:g} buffer {learner.memory.memory.maxlen}",
         flush=True,
     )
     learner.dump_best = lambda *args, **kwargs: None
-    label = "scaled ddpg"
-    _audited_train(learner, gain, label, 8000, 0, lambda *args: None)
+    _audited_train(learner, gain, label, num_episodes, 0, on_audit or (lambda *args: None))
     successes = learner.final_state_balanced
     print(
         f"{label} finished episodes {len(learner.episode_durations)} "
@@ -3849,9 +3813,9 @@ def _load_module(module, state):
 
 def _capture_learner(learner):
     count = len(learner.memory)
-    states = torch.empty(count, 7)
+    states = torch.empty(count, 8)
     actions = torch.empty(count, 1)
-    nexts = torch.empty(count, 7)
+    nexts = torch.empty(count, 8)
     rewards = torch.empty(count)
     terminal = torch.empty(count, dtype=torch.bool)
     for index, row in enumerate(learner.memory.memory):
@@ -3876,8 +3840,8 @@ def _capture_learner(learner):
         "policy_opt": copy.deepcopy(learner.policy_optimizer.state_dict()),
         "log_alpha": learner.log_alpha.detach().cpu().clone(),
         "steps_done": learner.steps_done,
-        "center": learner.obs_center.detach().clone(),
-        "spread": learner.obs_spread.detach().clone(),
+        "center": None if learner.obs_center is None else learner.obs_center.detach().clone(),
+        "spread": None if learner.obs_spread is None else learner.obs_spread.detach().clone(),
         "rng": (
             random.getstate(),
             np.random.get_state(),
@@ -4009,19 +3973,7 @@ def frozen_replay_split(env, gain):
     """Continue critic updates on a frozen copy of an earlier replay."""
     from DoublePendulum.nn.nn_common import EarlyStop
 
-    observations = []
-    for seed in range(20):
-        observation, _ = env.reset(seed=seed)
-        done = False
-        while not done:
-            observations.append(np.asarray(observation, dtype=np.float64))
-            observation, _, terminated, truncated, _ = env.step(lqr_force(env, gain))
-            done = terminated or truncated
-    columns = np.vstack(observations)
-    center = torch.tensor(columns.mean(axis=0), dtype=torch.float32, device=device)
-    spread = torch.tensor(np.maximum(columns.std(axis=0), 1e-8), dtype=torch.float32, device=device)
-    print("observation center " + " ".join(f"{value:.6f}" for value in center.tolist()), flush=True)
-    print("observation spread " + " ".join(f"{value:.6f}" for value in spread.tolist()), flush=True)
+    print("observation uses the environment scales", flush=True)
 
     original_check = EarlyStop.check
     captured = {}
@@ -4046,7 +3998,7 @@ def frozen_replay_split(env, gain):
     try:
         library_outcome.best = None
         _reseed(0)
-        learner = SAC_Learner(obs_center=center, obs_spread=spread, reward_scale=100.0, freeze_alpha=True)
+        learner = SAC_Learner(reward_scale=100.0, freeze_alpha=True)
         learner.dump_best = lambda *args, **kwargs: None
         remembering_check.learner = learner
         learner.train(num_episodes=4000)
@@ -4074,7 +4026,7 @@ def frozen_replay_split(env, gain):
 
 def _replay_facts(name, captured):
     rewards = captured["rewards"].numpy().reshape(-1)
-    angles = np.max(np.abs(captured["states"].numpy()[:, 1:3]) * (np.pi / 4.0), axis=1)
+    angles = np.max(np.abs(captured["states"].numpy()[:, 1:3]) * 0.5, axis=1)
     speeds = np.max(np.abs(captured["states"].numpy()[:, 3:6]), axis=1)
     reward_low, reward_mid, reward_high = np.quantile(rewards, [0.1, 0.5, 0.9])
     print(
@@ -4092,19 +4044,7 @@ def replay_swap(env, gain):
     """Swap a learner onto another run's replay and continue its updates."""
     from DoublePendulum.nn.nn_common import EarlyStop
 
-    observations = []
-    for seed in range(20):
-        observation, _ = env.reset(seed=seed)
-        done = False
-        while not done:
-            observations.append(np.asarray(observation, dtype=np.float64))
-            observation, _, terminated, truncated, _ = env.step(lqr_force(env, gain))
-            done = terminated or truncated
-    columns = np.vstack(observations)
-    center = torch.tensor(columns.mean(axis=0), dtype=torch.float32, device=device)
-    spread = torch.tensor(np.maximum(columns.std(axis=0), 1e-8), dtype=torch.float32, device=device)
-    print("observation center " + " ".join(f"{value:.6f}" for value in center.tolist()), flush=True)
-    print("observation spread " + " ".join(f"{value:.6f}" for value in spread.tolist()), flush=True)
+    print("observation uses the environment scales", flush=True)
 
     original_check = EarlyStop.check
     shots = {}
@@ -4143,7 +4083,7 @@ def replay_swap(env, gain):
     try:
         library_outcome.best = None
         _reseed(0)
-        learner = SAC_Learner(obs_center=center, obs_spread=spread, reward_scale=100.0, freeze_alpha=True)
+        learner = SAC_Learner(reward_scale=100.0, freeze_alpha=True)
         learner.dump_best = lambda *args, **kwargs: None
         remembering_check.learner = learner
         learner.train(num_episodes=8000)
@@ -4241,19 +4181,7 @@ def failure_tests(env, gain):
     """Run the 1M buffer, then continue it in a 2M buffer."""
     from DoublePendulum.nn.nn_common import EarlyStop
 
-    observations = []
-    for seed in range(20):
-        observation, _ = env.reset(seed=seed)
-        done = False
-        while not done:
-            observations.append(np.asarray(observation, dtype=np.float64))
-            observation, _, terminated, truncated, _ = env.step(lqr_force(env, gain))
-            done = terminated or truncated
-    columns = np.vstack(observations)
-    center = torch.tensor(columns.mean(axis=0), dtype=torch.float32, device=device)
-    spread = torch.tensor(np.maximum(columns.std(axis=0), 1e-8), dtype=torch.float32, device=device)
-    print("observation center " + " ".join(f"{value:.6f}" for value in center.tolist()), flush=True)
-    print("observation spread " + " ".join(f"{value:.6f}" for value in spread.tolist()), flush=True)
+    print("observation uses the environment scales", flush=True)
 
     shots = {}
     held = {}
@@ -4287,7 +4215,7 @@ def failure_tests(env, gain):
     try:
         library_outcome.best = None
         _reseed(0)
-        learner = SAC_Learner(obs_center=center, obs_spread=spread, reward_scale=100.0, freeze_alpha=True)
+        learner = SAC_Learner(reward_scale=100.0, freeze_alpha=True)
         learner.dump_best = lambda *args, **kwargs: None
         _audited_train(learner, gain, "buffer 1M", 8000, 0, on_audit)
         del learner
@@ -4478,7 +4406,7 @@ def _scaled_audit(name, learner, gain, counted, successes, durations):
     tilts = []
     for row in rows[::stride][:4096]:
         observed = np.asarray(row.state.detach().cpu().numpy(), dtype=np.float64).reshape(-1)
-        tilts.append(np.max(np.abs(observed[1:3] * (np.pi / 4.0))))
+        tilts.append(np.max(np.abs(observed[1:3] * 0.5)))
     tilts = np.asarray(tilts)
     holdout_successes = int(sum(episode_successes))
     median_length = float(np.median(lengths))
@@ -4497,6 +4425,8 @@ def _scaled_audit(name, learner, gain, counted, successes, durations):
     alpha_note = ""
     if hasattr(learner, "log_alpha"):
         alpha_note = f"alpha {float(learner.log_alpha.detach().exp()):.6f} "
+        if getattr(learner, "min_log_alpha", None) is not None and learner.alpha_steps:
+            alpha_note += f"floor {int(learner.alpha_floor_hits)}/{learner.alpha_steps} "
     spread_note = ""
     if gaussian:
         spread_note = (
@@ -4687,7 +4617,7 @@ def return_teacher(env, gain):
     feature_t = torch.tensor((train_input - center) / spread, dtype=torch.float32, device=device)
     target_t = torch.tensor(train_target / target_scale, dtype=torch.float32, device=device)
     torch.manual_seed(0)
-    nets = [SAC_Q_DP(7).to(device) for _ in range(2)]
+    nets = [SAC_Q_DP(8).to(device) for _ in range(2)]
     optimizer = optim.AdamW(
         [parameter for net in nets for parameter in net.parameters()],
         lr=3e-4, amsgrad=True,
@@ -4826,6 +4756,130 @@ def _ascend_actor(nets, observations, center, spread, target_scale, scale):
         torch.nn.utils.clip_grad_value_(actor.parameters(), 100)
         optimizer.step()
     _closed_loop("critic ascent", actor, None, None, scale)
+
+
+def crossq_critic_probe(env, gain, train_states=300, val_states=100, steps=6000):
+    """Fit a CrossQ critic to exact discounted returns and test whether it ranks nearby forces correctly.
+
+    Each state gets seven first forces, LQR plus offsets from -10 to +10 N. The target is the
+    discounted return (rewards / 100, gamma 0.99, 300 decisions) of that first force followed by
+    LQR. Training states come from LQR rollouts on seeds 0-19, half with 3 N noise; validation
+    states come from clean LQR rollouts on held-out seeds 100-119. The critic is trained by
+    regression only (no bootstrapping) with the CrossQ batch-renorm network and optimizer, then
+    scored with running statistics (eval) and with batch statistics (train). Chance is 0.5.
+    """
+    from DoublePendulum.nn.crossQ import CQ_Q_DP
+
+    scale = float(env.unwrapped.max_F)
+    gamma, horizon = 0.99, 300
+    offsets = np.array([-10.0, -5.0, -2.0, 0.0, 2.0, 5.0, 10.0])
+    rng = np.random.default_rng(0)
+
+    def lqr_rollout(seed, noise):
+        observation, _ = env.reset(seed=seed)
+        rows, done, decision = [], False, 0
+        while not done:
+            if decision % 10 == 0:
+                rows.append((np.asarray(observation, dtype=np.float64), env.unwrapped.pendulum.x.copy()))
+            force = lqr_force(env, gain) + noise * rng.standard_normal()
+            observation, _, terminated, truncated, _ = env.step(float(np.clip(force, -scale, scale)))
+            done = terminated or truncated
+            decision += 1
+        return rows
+
+    def discounted_return(raw, first_force):
+        place_state(env, raw)
+        total, weight, force = 0.0, 1.0, first_force
+        for _ in range(horizon):
+            _, reward, terminated, truncated, _ = env.step(force)
+            total += weight * float(reward) / 100.0
+            weight *= gamma
+            if terminated or truncated:
+                break
+            force = lqr_force(env, gain)
+        return total
+
+    def dataset(rows):
+        observations, forces, returns = [], [], []
+        for observation, raw in rows:
+            base = float(np.clip(-gain @ wrapped_error(raw), -scale, scale))
+            candidates = np.clip(base + offsets, -scale, scale)
+            observations.append(observation)
+            forces.append(candidates)
+            returns.append([discounted_return(raw, force) for force in candidates])
+        return np.stack(observations), np.stack(forces), np.array(returns)
+
+    def pairs(observations, forces):
+        z = torch.tensor(observations, dtype=torch.float32, device=device)
+        z = z.repeat_interleave(len(offsets), dim=0)
+        a = torch.tensor(forces.reshape(-1, 1) / scale, dtype=torch.float32, device=device)
+        return torch.cat((z, a), dim=1)
+
+    train_rows = [row for seed in range(20) for row in lqr_rollout(seed, 0.0 if seed % 2 == 0 else 3.0)]
+    val_rows = [row for seed in range(100, 120) for row in lqr_rollout(seed, 0.0)]
+    train_rows = [train_rows[i] for i in rng.choice(len(train_rows), min(train_states, len(train_rows)), replace=False)]
+    val_rows = [val_rows[i] for i in rng.choice(len(val_rows), min(val_states, len(val_rows)), replace=False)]
+    for state in tilted_states():
+        place_state(env, state)
+        val_rows.append((np.asarray(env.unwrapped._clip_obs(env.unwrapped._get_obs()), dtype=np.float64), state))
+    train_obs, train_forces, train_returns = dataset(train_rows)
+    val_obs, val_forces, val_returns = dataset(val_rows)
+    change = np.abs(val_returns[:, [0, 6]] - val_returns[:, [3]])
+    print(
+        f"train {len(train_rows)} states, validation {len(val_rows)} states (incl. tilted), "
+        f"return spread {train_returns.std():.4f}; |return change| vs LQR, "
+        f"10th/50th/90th pct at -10 N {np.percentile(change[:, 0], [10, 50, 90]).round(5)}, "
+        f"at +10 N {np.percentile(change[:, 1], [10, 50, 90]).round(5)}"
+    )
+
+    torch.manual_seed(0)
+    nets = [CQ_Q_DP(8).to(device) for _ in range(2)]
+    optimizer = optim.AdamW(
+        [parameter for net in nets for parameter in net.parameters()],
+        lr=1e-3, betas=(0.5, 0.999), amsgrad=True,
+    )
+    train_in = pairs(train_obs, train_forces)
+    train_y = torch.tensor(train_returns.reshape(-1, 1), dtype=torch.float32, device=device)
+    for _ in range(steps):
+        index = torch.randint(len(train_in), (128,), device=device)
+        loss = sum(nn.functional.mse_loss(net(train_in[index]), train_y[index]) for net in nets)
+        optimizer.zero_grad()
+        loss.backward()
+        for net in nets:
+            torch.nn.utils.clip_grad_value_(net.parameters(), 100)
+        optimizer.step()
+
+    val_in = pairs(val_obs, val_forces)
+    val_y = val_returns.reshape(-1, 1)
+
+    def predict(train_mode):
+        scored = copy.deepcopy(nets)
+        for net in scored:
+            net.train(train_mode)
+        with torch.no_grad():
+            values = torch.cat([net(val_in) for net in scored], dim=1).min(dim=1).values
+        return values.reshape(-1, len(offsets)).cpu().numpy()
+
+    base, minus2, plus2 = 3, 2, 4
+    for label, train_mode in (("eval (running stats)", False), ("train (batch stats)", True)):
+        values = predict(train_mode)
+        rmse = float(np.sqrt(np.mean((values - val_returns) ** 2)))
+        best = float(np.mean(np.argmax(values, axis=1) == np.argmax(val_returns, axis=1)))
+        diff_mc = val_returns - val_returns[:, [base]]
+        diff_critic = values - values[:, [base]]
+        mask = np.abs(diff_mc) > 1e-3
+        mask[:, base] = False
+        pair_agree = float(np.mean(np.sign(diff_critic[mask]) == np.sign(diff_mc[mask])))
+        slope_mc = val_returns[:, plus2] - val_returns[:, minus2]
+        slope_critic = values[:, plus2] - values[:, minus2]
+        slope_mask = np.abs(slope_mc) > 1e-3
+        slope_agree = float(np.mean(np.sign(slope_critic[slope_mask]) == np.sign(slope_mc[slope_mask])))
+        print(
+            f"{label}: RMSE {rmse:.3f}, best-force match {best:.2f}, "
+            f"pair direction agreement {pair_agree:.2f} over {int(mask.sum())} pairs, "
+            f"slope sign agreement {slope_agree:.2f} over {int(slope_mask.sum())} states, "
+            f"pass {pair_agree >= 0.9 and slope_agree >= 0.9}"
+        )
 
 
 def main():

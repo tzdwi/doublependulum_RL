@@ -75,5 +75,5 @@ MODEL_IDS = tuple(POLICIES.keys())
 
 def load(model_id):
 	reg = POLICIES[model_id]
-	net = reg["load"](7)
+	net = reg["load"](8)
 	return net

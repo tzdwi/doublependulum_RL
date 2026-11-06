@@ -20,7 +20,7 @@ import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
 
-from .nn_common import this_dir, plot_dir, init_env, device, Transition, ReplayMemory, warmup_action, EarlyStop, polyak_update, prepare_parallel, run_parallel, LQR_OBS_CENTER, LQR_OBS_SPREAD, _maybe_record, _record_final, _shift_training_seed
+from .nn_common import this_dir, plot_dir, init_env, device, Transition, ReplayMemory, warmup_action, EarlyStop, polyak_update, prepare_parallel, run_parallel, _maybe_record, _record_final, _shift_training_seed
 
 BRO_optimistic_pickle = this_dir+"/pickles/bro_optimistic_net.pt"
 BRO_pessimistic_pickle = this_dir+"/pickles/bro_pessimistic_net.pt"
@@ -116,8 +116,8 @@ class BRO_Learner:
                  actor_holdback=20000,
                  reset_holdback=2000,
                  log_progress=False,
-                 obs_center=LQR_OBS_CENTER,
-                 obs_spread=LQR_OBS_SPREAD,
+                 obs_center=None,
+                 obs_spread=None,
                  num_envs=1):
 
         self.env = init_env(size=size,
@@ -558,8 +558,6 @@ class BRO_Learner:
                     stop = early.check(
                         self.episode_durations, self.final_state_balanced,
                         self.steps_done > self.actor_start_step)
-                    if early.improved or (stop or "").startswith("solved"):
-                        self.dump_best(len(self.episode_durations), early.best)
                     break
             if stop:
                 print(stop)
