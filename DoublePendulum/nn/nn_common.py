@@ -330,6 +330,10 @@ def warmup_action(action_space):
     action = np.random.normal(0.0, 0.2 * scale)
     return float(np.clip(action, action_space.low[0], action_space.high[0]))
 
+
+def uniform_warmup_action(action_space):
+    return float(np.random.uniform(action_space.low[0], action_space.high[0]))
+
 class EarlyStop:
     """Stop training once the task is solved, or once episode length stops improving."""
 

@@ -15,7 +15,7 @@ import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
 
-from .nn_common import this_dir, plot_dir, init_env, device, Transition, ReplayMemory, warmup_action, EarlyStop, polyak_update, prepare_parallel, run_parallel, _maybe_record, _record_final, _shift_training_seed
+from .nn_common import this_dir, plot_dir, init_env, device, Transition, ReplayMemory, uniform_warmup_action, EarlyStop, polyak_update, prepare_parallel, run_parallel, _maybe_record, _record_final, _shift_training_seed
 
 DDPG_policy_pickle = this_dir+"/pickles/ddpg_policy_net.pt"
 DDPG_Q_pickle = this_dir+"/pickles/ddpg_q_net.pt"
@@ -85,13 +85,13 @@ class DDPG_Learner:
                  l2=10.0, 
                  dt=0.01, 
                  theta_tol=np.pi/10,
-                 batch_size=128,
+                 batch_size=256,
                  gamma=0.99,
                  tau=0.995,
                  learning_rate=3e-4,
                  policy_delay=2,
-                 actor_holdback=20000,
-                 start_steps=2000,
+                 actor_holdback=0,
+                 start_steps=10000,
                  buffer_length=1e6,
                  log_progress=False,
                  obs_center=None,
@@ -187,10 +187,10 @@ class DDPG_Learner:
         We deterministically pick an action and add on decaying white noise.
 
         We also want some exploration, so for the first `start_steps` steps, we sample
-        actions from a narrow distribution around zero force.
+        actions uniformly across the force range.
         """
         if (self.steps_done < self.start_steps) and (not do_deterministic):
-            action = torch.as_tensor(warmup_action(self.env.action_space), device=device, dtype=torch.float32).view(1, 1)
+            action = torch.as_tensor(uniform_warmup_action(self.env.action_space), device=device, dtype=torch.float32).view(1, 1)
         else:
             with torch.no_grad():
                 action = self.policy_net(self._condition(state))
