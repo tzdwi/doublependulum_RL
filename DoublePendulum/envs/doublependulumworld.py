@@ -151,7 +151,7 @@ class DoublePendulumEnv(gym.Env):
     def decision_from_infos(self, infos):
         # The balance score is averaged so each decision is about 1 while upright.
         # A fall ends the episode; the five-second success flag is recorded and does not end it.
-        shaping = ["control_penalty", "balance_reward", "tilt_rate", "speed_penalty", "still_reward"]
+        shaping = ["control_penalty", "balance_reward", "speed_penalty", "still_reward"]
         events = ["failure_penalty", "offtrack_penalty"]
         info = {key: float(np.mean([i[key] for i in infos])) for key in shaping}
         info.update({key: float(sum(i[key] for i in infos)) for key in events})
@@ -162,7 +162,6 @@ class DoublePendulumEnv(gym.Env):
             + info["still_reward"]
             - info["control_penalty"]
             - info["offtrack_penalty"]
-            - info["tilt_rate"]
             - info["speed_penalty"]
         )
         return self._clip_obs(self._get_obs()), reward, terminated, info
@@ -200,9 +199,6 @@ class DoublePendulumEnv(gym.Env):
         # Full force costs 1e-5, below the upright change from one decision on this plant.
         control_penalty = 1e-5 * (self.state[6] / self.max_F) ** 2.0
         balance_reward = 0.5 * (max(0.0, math.cos(theta1_err)) + max(0.0, math.cos(theta2_err)))
-        # Positive when a pole is rotating further from upright, negative when it is rotating back.
-        # Weight 100 makes a few degrees of lean at a few degrees per second worth a few tenths of a point.
-        tilt_rate = 100.0 * (theta1_err * self.state[4] + theta2_err * self.state[5])
         # Penalize motion above the same Cartesian speed threshold used for success.
         # This is continuous in both speed and angle, and capped below the balance reward.
         max_speed = max(abs(cartesian[3]), math.hypot(*cartesian[4]), math.hypot(*cartesian[5]))
@@ -218,7 +214,6 @@ class DoublePendulumEnv(gym.Env):
         return {
             "control_penalty": float(control_penalty),
             "balance_reward": float(balance_reward),
-            "tilt_rate": float(tilt_rate),
             "speed_penalty": float(speed_penalty),
             "still_reward": float(still_reward),
             "failure_penalty": float(failure_penalty),

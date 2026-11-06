@@ -42,7 +42,6 @@ from DoublePendulum.nn.sac import SAC_Learner, SAC_POLICY_DP, SAC_Q_DP
 
 TERMS = [
     "balance_reward",
-    "tilt_rate",
     "speed_penalty",
     "still_reward",
     "control_penalty",
