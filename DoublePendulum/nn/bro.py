@@ -233,10 +233,10 @@ class BRO_Learner:
         #optimizers
         self.Q_optimizer = optim.AdamW([{"params":self.Q_net_1.parameters()},
                                        {"params":self.Q_net_2.parameters()}],
-                                       lr=self.LR,weight_decay=1e-4)
+                                       lr=self.LR, weight_decay=0.0)
         
-        self.optimistic_optimizer = optim.AdamW(self.optimistic_net.parameters(), lr=self.LR, amsgrad=True, weight_decay=1e-4)
-        self.pessimistic_optimizer = optim.AdamW(self.pessimistic_net.parameters(), lr=self.LR, amsgrad=True, weight_decay=1e-4)
+        self.optimistic_optimizer = optim.AdamW(self.optimistic_net.parameters(), lr=self.LR, amsgrad=True, weight_decay=0.0)
+        self.pessimistic_optimizer = optim.AdamW(self.pessimistic_net.parameters(), lr=self.LR, amsgrad=True, weight_decay=0.0)
 
         self.temperature_optimizer = optim.Adam([self.LOGALPHA], lr=self.LR, amsgrad=True, betas=(0.5,0.999))
         self.optimism_optimizer = optim.Adam([self.LOGBETA], lr=0.1*self.LR, amsgrad=True, betas=(0.5,0.999))
@@ -368,8 +368,8 @@ class BRO_Learner:
         self.Q_optimizer.zero_grad()
         loss.backward()
         # In-place gradient clipping
-        torch.nn.utils.clip_grad_value_(self.Q_net_1.parameters(), 100)
-        torch.nn.utils.clip_grad_value_(self.Q_net_2.parameters(), 100)
+        torch.nn.utils.clip_grad_norm_(self.Q_net_1.parameters(), 10)
+        torch.nn.utils.clip_grad_norm_(self.Q_net_2.parameters(), 10)
         self.Q_optimizer.step()
 
         # Step 11 (run early; steps 4-10 use only the online critics): Update target networks
@@ -405,7 +405,7 @@ class BRO_Learner:
         loss = -(Qs_pes-self.temp*logprobs_pes).sum()/self.BATCH_SIZE
         loss.backward()
         # In-place gradient clipping
-        torch.nn.utils.clip_grad_value_(self.pessimistic_net.parameters(), 100)
+        torch.nn.utils.clip_grad_norm_(self.pessimistic_net.parameters(), 10)
         self.pessimistic_optimizer.step()
 
         # Step 6: Calculate optimistic actor value
@@ -441,7 +441,7 @@ class BRO_Learner:
         loss = (-Qs_opt + self.KLweight*KL).sum()/self.BATCH_SIZE
         loss.backward()
         # In-place gradient clipping
-        torch.nn.utils.clip_grad_value_(self.optimistic_net.parameters(), 100)
+        torch.nn.utils.clip_grad_norm_(self.optimistic_net.parameters(), 10)
         self.optimistic_optimizer.step()
         # we'll need the mean KL downstream
         delta = KL.detach().mean() / abs(self.env.action_space.shape[0]) - self.KL_TARGET

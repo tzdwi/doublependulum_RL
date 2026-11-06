@@ -159,9 +159,9 @@ class DDPG_Learner:
         self.Q_target.load_state_dict(self.Q_net.state_dict())
         
         self.Q_optimizer = optim.AdamW(self.Q_net.parameters(),
-                                       lr=self.LR, amsgrad=True)
+                                       lr=self.LR, amsgrad=True, weight_decay=0.0)
         self.policy_optimizer = optim.AdamW(self.policy_net.parameters(), 
-                                            lr=self.LR, amsgrad=True)
+                                            lr=self.LR, amsgrad=True, weight_decay=0.0)
         # Mean squared error loss
         self.criterion = nn.MSELoss()
         self.memory = ReplayMemory(int(buffer_length))
@@ -256,7 +256,7 @@ class DDPG_Learner:
         self.Q_optimizer.zero_grad()
         loss.backward()
         # In-place gradient clipping
-        torch.nn.utils.clip_grad_value_(self.Q_net.parameters(), 100)
+        torch.nn.utils.clip_grad_norm_(self.Q_net.parameters(), 10)
         self.Q_optimizer.step()
 
         if not do_policy_step:
@@ -269,7 +269,7 @@ class DDPG_Learner:
         self.policy_optimizer.zero_grad()
         loss.backward()
         # In-place gradient clipping
-        torch.nn.utils.clip_grad_value_(self.policy_net.parameters(), 100)
+        torch.nn.utils.clip_grad_norm_(self.policy_net.parameters(), 10)
         self.policy_optimizer.step()
 
     def _actor_started(self):

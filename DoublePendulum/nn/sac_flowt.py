@@ -233,9 +233,9 @@ class SAC_FLOWT_Learner:
 		
 		self.Q_optimizer = optim.AdamW([{"params":self.Q_net_1.parameters()},
 									   {"params":self.Q_net_2.parameters()}],
-									   lr=self.LR, betas=adam_betas, amsgrad=True)
+									   lr=self.LR, betas=adam_betas, amsgrad=True, weight_decay=0.0)
 		self.velocity_optimizer = optim.AdamW(self.velocity_net.parameters(), 
-											lr=self.LR, betas=adam_betas, amsgrad=True)
+											lr=self.LR, betas=adam_betas, amsgrad=True, weight_decay=0.0)
 		# Mean squared error loss
 		self.criterion = nn.MSELoss()
 		self.memory = ReplayMemory(int(buffer_length))
@@ -334,8 +334,8 @@ class SAC_FLOWT_Learner:
 		self.Q_optimizer.zero_grad()
 		loss.backward()
 		# In-place gradient clipping
-		torch.nn.utils.clip_grad_value_(self.Q_net_1.parameters(), 100)
-		torch.nn.utils.clip_grad_value_(self.Q_net_2.parameters(), 100)
+		torch.nn.utils.clip_grad_norm_(self.Q_net_1.parameters(), 10)
+		torch.nn.utils.clip_grad_norm_(self.Q_net_2.parameters(), 10)
 		self.Q_optimizer.step()
 
 		if not do_policy_step:
@@ -351,7 +351,7 @@ class SAC_FLOWT_Learner:
 		self.velocity_optimizer.zero_grad()
 		loss.backward()
 		# In-place gradient clipping
-		torch.nn.utils.clip_grad_value_(self.velocity_net.parameters(), 100)
+		torch.nn.utils.clip_grad_norm_(self.velocity_net.parameters(), 10)
 		self.velocity_optimizer.step()
 
 		if self.freeze_alpha:
