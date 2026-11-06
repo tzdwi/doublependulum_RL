@@ -509,7 +509,7 @@ class BRO_Learner:
             _maybe_record(self, i_episode)
             cumulative_reward = 0
             # Initialize the environment and get its state
-            state, info = self.env.reset(seed=_shift_training_seed(i_episode))
+            state, info = self.env.reset(seed=_shift_training_seed(i_episode), options={"training": True})
             state = torch.tensor(state, dtype=torch.float32, device=device).unsqueeze(0)
             for t in count():
                 # select action based on observed state

@@ -114,28 +114,36 @@ class DoublePendulumEnv(gym.Env):
     def reset(self, seed=None, options=None):
         # We need the following line to seed self.np_random
         super().reset()
+        options = options or {}
 
-        # Reset the pendulum
-        self.pendulum._initialize(seed=seed)
+        # Odd training episodes start wider and are then shoved. Even episodes and
+        # every evaluation reset keep the narrow start. The +20 seed shift preserves parity.
+        wide = bool(options.get("training")) and seed is not None and int(seed) % 2 == 1
+        self.pendulum._initialize(seed=seed, wide=wide)
 
         # Optionally make the pendulum perfectly balanced
         # if we're running the demo
-        if options and options.get("balanced"):
+        if options.get("balanced"):
             self.pendulum.x[:] = 0
             self.pendulum.x[1] = np.pi
             self.pendulum.x[2] = np.pi
             self.pendulum.x[4] = 0.0
             self.pendulum.x[5] = 0.0
+            wide = False
 
         # Set agent force to 0
         self._agent_location = 0.0
-
-        # Reset the state
-        observation = self._get_obs()
+        self.success_frames = 0
         self.state = self._get_state()
 
-        # Reset success frames
-        self.success_frames = 0
+        if "push" in options and options["push"] is not None:
+            self._shove(float(options["push"]))
+        elif wide:
+            rng = np.random.default_rng((int(seed), 1))
+            self._shove(float(rng.uniform(-self.max_F, self.max_F)))
+
+        observation = self._get_obs()
+        self.state = self._get_state()
 
         info = {}
 
@@ -143,6 +151,17 @@ class DoublePendulumEnv(gym.Env):
             self.render()
 
         return self._clip_obs(observation), info
+
+    def _shove(self, force):
+        # One decision of external force, then clear it. The policy never sees the force, only the motion it leaves.
+        self.hold_force(force)
+        for _ in range(self.action_repeat):
+            info = self._physics_step()
+            if info["failure_penalty"]:
+                break
+        self._agent_location = 0.0
+        self.success_frames = 0
+        self.state = self._get_state()
 
     def hold_force(self, action):
         # The action space is a length-1 box, so a vector step sends shape (1,).

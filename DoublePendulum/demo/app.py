@@ -4,7 +4,7 @@ Pendulum Game API Endpoint
 REST API endpoints for interacting with a Session object
     - GET /models : see available RL models to play with
 	- POST /session : Creates new session, gives cookies for continued interaction
-	- POST /kick?scale=XX : kicks the pendulum with a XX N force
+	- POST /kick?scale=XX : pushes the cart with XX N for one decision, sign chosen at random
 	- POST /step : increments timestep
 
 Run from the repo root with: uvicorn DoublePendulum.demo.app:app --reload

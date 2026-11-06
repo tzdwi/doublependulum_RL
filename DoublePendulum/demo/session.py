@@ -42,17 +42,14 @@ class Session:
 			self.action = POLICIES[model_id]["action"]
 		return self.start()
 
-	def kick(self, scale=0.1):
-		# a small kick, scaled by the user-set slider bar
-		self.env.unwrapped._agent_location = scale*np.random.randn()
-		
-		# Keep the environment's internal state in physical units.
-		self.env.unwrapped.state = self.env.unwrapped._get_state()
-
-		# we're playing now!
+	def kick(self, scale=5.0):
+		# Slider value is a force in newtons. The sign is random, and the force is held for one decision.
+		plant = self.env.unwrapped
+		magnitude = float(np.clip(scale, 0.0, plant.max_F))
+		sign = -1.0 if np.random.random() < 0.5 else 1.0
+		plant._shove(sign * magnitude)
 		self.playing = True
-
-		return self.env.unwrapped.render()
+		return plant.render()
 
 	def step(self):
 		if not self.playing:

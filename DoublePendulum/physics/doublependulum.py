@@ -119,13 +119,18 @@ class DoublePendulum:
             self.g2_part, self.g3_part,
         ))
 
-    def _initialize(self, seed):
+    def _initialize(self, seed, wide=False):
         rng = np.random.default_rng(seed)
         init_arr = np.zeros(6) # x_m, theta_1, theta_2, then time derivatives
-        init_arr[1] = np.pi+0.01*rng.uniform(-1, 1) #random
-        init_arr[2] = np.pi+0.01*rng.uniform(-1, 1)
-        init_arr[4] = 0.0001*rng.normal()
-        init_arr[5] = 0.0001*rng.normal()
+        spread = 0.05 if wide else 0.01
+        init_arr[1] = np.pi + spread * rng.uniform(-1, 1)
+        init_arr[2] = np.pi + spread * rng.uniform(-1, 1)
+        if wide:
+            init_arr[4] = 0.05 * rng.uniform(-1, 1)
+            init_arr[5] = 0.05 * rng.uniform(-1, 1)
+        else:
+            init_arr[4] = 0.0001 * rng.normal()
+            init_arr[5] = 0.0001 * rng.normal()
         self.x = init_arr
         self._validate_state_arr()
         self.t = 0

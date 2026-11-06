@@ -84,7 +84,7 @@ def run_parallel(learner, num_episodes, start_episode, choose_actions, on_step, 
         episode_index = [start_episode + i for i in range(n)]
         next_index = start_episode + n
         seeds = [_shift_training_seed(index) for index in episode_index]
-        observations, _ = vec.reset(seed=seeds)
+        observations, _ = vec.reset(seed=seeds, options={"training": True})
         states = [
             torch.tensor(observations[i], dtype=torch.float32, device=device).unsqueeze(0)
             for i in range(n)
@@ -152,7 +152,7 @@ def run_parallel(learner, num_episodes, start_episode, choose_actions, on_step, 
                     step_index[i] = 0
                     returns[i] = 0.0
                 reset_obs, _ = vec.reset(
-                    seed=reset_seeds, options={"reset_mask": mask}
+                    seed=reset_seeds, options={"reset_mask": mask, "training": True}
                 )
                 for i in finished:
                     states[i] = torch.tensor(
