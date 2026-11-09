@@ -510,13 +510,12 @@ class CrossQ_Learner:
         save_checkpoint(self.Q_net_1.state_dict(), CQ_Q1_pickle)
         save_checkpoint(self.Q_net_2.state_dict(), CQ_Q2_pickle)
 
-    def dump_best(self, episode, mean_length):
+    def dump_best(self, episode, holdout):
         os.makedirs(os.path.dirname(CQ_policy_best_pickle), exist_ok=True)
         save_checkpoint(self.policy_net.state_dict(), CQ_policy_best_pickle)
         save_checkpoint(self.Q_net_1.state_dict(), CQ_Q1_best_pickle)
         save_checkpoint(self.Q_net_2.state_dict(), CQ_Q2_best_pickle)
-        length = "n/a" if mean_length is None else f"{mean_length:.0f}"
-        print(f"saved best policy at episode {episode}, mean length {length}")
+        print(f"saved best policy at episode {episode}, held-out {holdout}")
 
     def load(self, best=True):
         policy_path = CQ_policy_best_pickle if best else CQ_policy_pickle

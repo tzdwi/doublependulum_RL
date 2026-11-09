@@ -340,7 +340,7 @@ def _maybe_record(learner, episode_index):
         )
         if score > getattr(learner, "holdout_best", -1):
             learner.holdout_best = score
-            learner.dump_best(episode_index, None)
+            learner.dump_best(episode_index, f"{score}/{full}")
 
 
 def _record_final(learner):

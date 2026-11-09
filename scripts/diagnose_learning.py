@@ -3768,16 +3768,17 @@ def crossq_scaled_run(env, gain, learning_rate=None, adam_betas=None, label=None
         torch.cuda.empty_cache()
 
 
-def ddpg_scaled_run(env, gain, label="scaled ddpg", num_episodes=8000, on_audit=None):
+def ddpg_scaled_run(env, gain, label="scaled ddpg", num_episodes=8000, on_audit=None, learner_kwargs=None):
     """Train DDPG with reward scale 100 and audit its critic slope."""
     from DoublePendulum.nn.ddpg import DDPG_Learner
 
     _reseed(0)
     library_outcome.best = None
-    learner = DDPG_Learner()
+    learner = DDPG_Learner(**(learner_kwargs or {}))
     print("observation uses the environment scales", flush=True)
     print(
-        f"reward scale {learner.reward_scale:g} buffer {learner.memory.capacity}",
+        f"reward scale {learner.reward_scale:g} buffer {learner.memory.capacity} "
+        f"twin critic {learner.twin_critic} target noise {learner.target_noise:g} clip {learner.target_noise_clip:g}",
         flush=True,
     )
     learner.dump_best = lambda *args, **kwargs: None

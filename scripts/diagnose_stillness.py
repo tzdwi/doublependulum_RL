@@ -32,7 +32,14 @@ import torch
 
 import diagnose_learning as diag
 
-LEARNERS = ("ddpg", "sac", "crossq")
+LEARNERS = ("ddpg", "ddpg-twin", "ddpg-td3", "sac", "crossq")
+
+# Diagnostic variants only. Plain "ddpg" stays the paper algorithm.
+DDPG_VARIANTS = {
+    "ddpg": {},
+    "ddpg-twin": {"twin_critic": True},
+    "ddpg-td3": {"twin_critic": True, "target_noise": 0.2, "target_noise_clip": 0.5},
+}
 
 
 def short_line(line):
@@ -80,7 +87,7 @@ class ShortLines:
         return getattr(self.stream, name)
 
 
-def ddpg_probe(counted, learner, gain):
+def ddpg_probe(name, counted, learner, gain):
     """Every 500 episodes: how saturated the actor and replay are, and how the critic scores forces."""
     if counted % 500:
         return
@@ -127,10 +134,10 @@ def ddpg_probe(counted, learner, gain):
         f"{float((q_lqr > q_policy).float().mean()):.0%}",
         flush=True,
     )
-    torch.save(
-        {"policy": learner.policy_net.state_dict(), "critic": learner.Q_net.state_dict()},
-        f"/tmp/stillness_ddpg_ep{counted}.pt",
-    )
+    snapshot = {"policy": learner.policy_net.state_dict(), "critic": learner.Q_net.state_dict()}
+    if learner.twin_critic:
+        snapshot["critic_2"] = learner.Q_net_2.state_dict()
+    torch.save(snapshot, f"/tmp/stillness_{name.replace('-', '_')}_ep{counted}.pt")
 
 
 def run_one(name, episodes):
@@ -138,10 +145,11 @@ def run_one(name, episodes):
     env = diag.init_env()
     gain = diag.discrete_lqr(env.unwrapped)
     print(f"{name}: value ceiling for this reward is 1.0", flush=True)
-    if name == "ddpg":
+    if name in DDPG_VARIANTS:
         diag.ddpg_scaled_run(
-            env, gain, label="stillness ddpg", num_episodes=episodes,
-            on_audit=lambda counted, audit, learner: ddpg_probe(counted, learner, gain),
+            env, gain, label=f"stillness {name}", num_episodes=episodes,
+            on_audit=lambda counted, audit, learner: ddpg_probe(name, counted, learner, gain),
+            learner_kwargs=DDPG_VARIANTS[name],
         )
     elif name == "sac":
         diag.speed_penalty_run(
@@ -155,7 +163,7 @@ def run_one(name, episodes):
 def main():
     args = sys.argv[1:]
     if not args or args[0] not in LEARNERS:
-        raise SystemExit("usage: diagnose_stillness.py ddpg|sac|crossq [episodes]")
+        raise SystemExit("usage: diagnose_stillness.py " + "|".join(LEARNERS) + " [episodes]")
     episodes = int(args[1]) if len(args) > 1 else 8000
     run_one(args[0], episodes)
 

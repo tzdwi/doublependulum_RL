@@ -488,13 +488,12 @@ class SAC_FLOWG_Learner:
 		save_checkpoint(self.Q_target_1.state_dict(), SAC_G_Q1_pickle)
 		save_checkpoint(self.Q_target_2.state_dict(), SAC_G_Q2_pickle)
 
-	def dump_best(self, episode, mean_length):
+	def dump_best(self, episode, holdout):
 		os.makedirs(os.path.dirname(SAC_G_velocity_best_pickle), exist_ok=True)
 		save_checkpoint(self.velocity_net.state_dict(), SAC_G_velocity_best_pickle)
 		save_checkpoint(self.Q_target_1.state_dict(), SAC_G_Q1_best_pickle)
 		save_checkpoint(self.Q_target_2.state_dict(), SAC_G_Q2_best_pickle)
-		length = "n/a" if mean_length is None else f"{mean_length:.0f}"
-		print(f"saved best policy at episode {episode}, mean length {length}")
+		print(f"saved best policy at episode {episode}, held-out {holdout}")
 
 	def load(self, best=True):
 		velocity_path = SAC_G_velocity_best_pickle if best else SAC_G_velocity_pickle
