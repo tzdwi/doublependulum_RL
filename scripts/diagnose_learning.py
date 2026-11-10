@@ -4365,6 +4365,23 @@ def _as_action(action):
     return action[0] if isinstance(action, tuple) else action
 
 
+def _audit_forces(learner, observations, deterministic):
+    """One force per observation. Falls back to one call each if the learner is still warming up."""
+    states = torch.tensor(np.asarray(observations, dtype=np.float32), device=device)
+    with torch.no_grad():
+        action = _as_action(learner.select_action(states, do_deterministic=deterministic))
+    flat = action.detach().reshape(-1)
+    if flat.numel() != len(observations):
+        forces = []
+        for obs in observations:
+            state = torch.tensor(obs, dtype=torch.float32, device=device).unsqueeze(0)
+            with torch.no_grad():
+                one = _as_action(learner.select_action(state, do_deterministic=deterministic))
+            forces.append(float(one))
+        return forces
+    return [float(flat[i]) for i in range(len(observations))]
+
+
 def _scaled_audit(name, learner, gain, counted, successes, durations):
     probe = init_env()
     limit = float(probe.unwrapped.max_F)
@@ -4376,91 +4393,106 @@ def _scaled_audit(name, learner, gain, counted, successes, durations):
     upright_fractions, upright_speeds, holds, speed_penalties = [], [], [], []
     values, slopes, toward = [], [], 0
     scale = float(learner.scale if hasattr(learner, "scale") else learner.policy_net.scale)
-    gaussian = None
-    for seed in range(100, 120):
-        observation, _ = probe.reset(seed=seed)
-        state = torch.tensor(observation, dtype=torch.float32, device=device).unsqueeze(0)
-        with torch.no_grad():
-            action = _as_action(learner.select_action(state, do_deterministic=True))
-            if hasattr(learner, "policy_net"):
-                policy_out = learner.policy_net(learner._condition(state))
-                if gaussian is None:
-                    gaussian = policy_out.shape[-1] == 2
-            elif gaussian is None:
-                gaussian = False
-            if gaussian:
-                mean, log_std = policy_out.chunk(2, dim=-1)
-                log_std = log_std.clamp(-20, 2)
-                dist = torch.distributions.Normal(mean, log_std.exp())
-                sampled = dist.sample((32,))
-                sampled_force = torch.clamp(scale * torch.tanh(sampled), -scale, scale)
-                pre_means.append(abs(float(mean)))
-                pre_stds.append(float(log_std.exp()))
-                force_stds.append(float(sampled_force.std(unbiased=False)))
-        force = action.detach().reshape(1, 1).requires_grad_(True)
-        critic_in = torch.cat((learner._condition(state), force / scale), dim=-1)
-        critics = (learner.Q_net_1, learner.Q_net_2) if hasattr(learner, "Q_net_1") else (learner.Q_net,)
-        was_training = [net.training for net in critics]
-        for net in critics:
-            net.eval()
-        if len(critics) == 2:
-            value = torch.minimum(critics[0](critic_in), critics[1](critic_in)).sum()
-        else:
-            value = critics[0](critic_in).sum()
-        slope = torch.autograd.grad(value, force)[0]
+    seeds = list(range(100, 120))
+    rollout = [init_env() for _ in seeds]
+    observations = []
+    for env, seed in zip(rollout, seeds):
+        obs, _ = env.reset(seed=seed)
+        observations.append(np.asarray(obs, dtype=np.float32))
+    actions = _audit_forces(learner, observations, True)
+    critics = (learner.Q_net_1, learner.Q_net_2) if hasattr(learner, "Q_net_1") else (learner.Q_net,)
+    was_training = [net.training for net in critics]
+    for net in critics:
+        net.eval()
+    try:
+        for env, obs, action in zip(rollout, observations, actions):
+            state = torch.tensor(obs, dtype=torch.float32, device=device).unsqueeze(0)
+            with torch.no_grad():
+                if hasattr(learner, "policy_net"):
+                    policy_out = learner.policy_net(learner._condition(state))
+                    if policy_out.shape[-1] == 2:
+                        mean, log_std = policy_out.chunk(2, dim=-1)
+                        log_std = log_std.clamp(-20, 2)
+                        dist = torch.distributions.Normal(mean, log_std.exp())
+                        sampled = dist.sample((32,))
+                        sampled_force = torch.clamp(scale * torch.tanh(sampled), -scale, scale)
+                        pre_means.append(abs(float(mean)))
+                        pre_stds.append(float(log_std.exp()))
+                        force_stds.append(float(sampled_force.std(unbiased=False)))
+            force = torch.tensor([[action]], dtype=torch.float32, device=device, requires_grad=True)
+            critic_in = torch.cat((learner._condition(state), force / scale), dim=-1)
+            if len(critics) == 2:
+                value = torch.minimum(critics[0](critic_in), critics[1](critic_in)).sum()
+            else:
+                value = critics[0](critic_in).sum()
+            slope = torch.autograd.grad(value, force)[0]
+            lqr = _force_from_physics(env.unwrapped.pendulum.x, gain, limit)
+            values.append(float(value.detach()))
+            slopes.append(float(slope.detach()))
+            toward += int(float(slope.detach()) * (lqr - float(force.detach())) > 0)
+    finally:
         for net, training in zip(critics, was_training):
             net.train(training)
-        lqr = _force_from_physics(probe.unwrapped.pendulum.x, gain, limit)
-        values.append(float(value.detach()))
-        slopes.append(float(slope.detach()))
-        toward += int(float(slope.detach()) * (lqr - float(force.detach())) > 0)
-        done = False
-        length = 0
-        opening = abs(float(action))
-        info = {}
-        upright_steps, speeds_when_upright, hold = 0, [], 0.0
-        penalty_sum = 0.0
-        while not done:
-            observation, _, terminated, truncated, info = probe.step(float(action))
-            length += 1
-            penalty_sum += float(info["stillness"])
-            done = terminated or truncated
-            physical = wrapped_error(probe.unwrapped.pendulum.x)
+
+    count = len(seeds)
+    alive = [True] * count
+    current = list(actions)
+    lengths = [0] * count
+    infos = [{} for _ in seeds]
+    upright_steps = [0] * count
+    speeds_when_upright = [[] for _ in seeds]
+    holds = [0.0] * count
+    penalty_sums = [0.0] * count
+    openings = [abs(action) for action in actions]
+    while any(alive):
+        pending = []
+        for i, env in enumerate(rollout):
+            if not alive[i]:
+                continue
+            obs, _, terminated, truncated, info = env.step(current[i])
+            lengths[i] += 1
+            infos[i] = info
+            penalty_sums[i] += float(info["stillness"])
+            plant = env.unwrapped
+            physical = wrapped_error(plant.pendulum.x)
             tilt = float(np.max(np.abs(physical[1:3])))
-            cartesian = probe.unwrapped.pendulum.transform_cartesian(do_vels=True)
-            speed = max(
-                abs(cartesian[3]),
-                float(np.hypot(*cartesian[4])),
-                float(np.hypot(*cartesian[5])),
-            )
+            cartesian = plant.pendulum.transform_cartesian(do_vels=True)
+            speed = max(abs(cartesian[3]), float(np.hypot(*cartesian[4])), float(np.hypot(*cartesian[5])))
             if tilt < tolerance:
-                upright_steps += 1
-                speeds_when_upright.append(speed / still_limit)
-            hold = max(hold, probe.unwrapped.success_frames * probe.unwrapped.dt)
-            if not done:
-                state = torch.tensor(observation, dtype=torch.float32, device=device).unsqueeze(0)
-                with torch.no_grad():
-                    action = _as_action(learner.select_action(state, do_deterministic=True))
-        episode_successes.append(bool(info.get("success", False)))
-        lengths.append(length)
-        openings.append(opening)
-        upright_fractions.append(upright_steps / length)
-        upright_speeds.append(float(np.median(speeds_when_upright)) if speeds_when_upright else np.nan)
-        holds.append(hold)
-        speed_penalties.append(penalty_sum / length)
-        observation, _ = probe.reset(seed=seed)
-        done = False
-        length = 0
-        info = {}
-        while not done:
-            state = torch.tensor(observation, dtype=torch.float32, device=device).unsqueeze(0)
-            with torch.no_grad():
-                action = _as_action(learner.select_action(state, do_deterministic=False))
-            observation, _, terminated, truncated, info = probe.step(float(action))
-            length += 1
-            done = terminated or truncated
-        stochastic_successes.append(bool(info.get("success", False)))
-        stochastic_lengths.append(length)
+                upright_steps[i] += 1
+                speeds_when_upright[i].append(speed / still_limit)
+            holds[i] = max(holds[i], plant.success_frames * plant.dt)
+            if terminated or truncated:
+                alive[i] = False
+            else:
+                pending.append((i, np.asarray(obs, dtype=np.float32)))
+        if pending:
+            fresh = _audit_forces(learner, [obs for _, obs in pending], True)
+            for (i, _), force in zip(pending, fresh):
+                current[i] = force
+    episode_successes = [bool(info.get("success", False)) for info in infos]
+    upright_fractions = [steps / length for steps, length in zip(upright_steps, lengths)]
+    upright_speeds = [float(np.median(speeds)) if speeds else np.nan for speeds in speeds_when_upright]
+    speed_penalties = [total / length for total, length in zip(penalty_sums, lengths)]
+
+    for env, seed in zip(rollout, seeds):
+        obs, _ = env.reset(seed=seed)
+        observations[seeds.index(seed)] = np.asarray(obs, dtype=np.float32)
+    alive = [True] * count
+    stochastic_lengths = [0] * count
+    stochastic_infos = [{} for _ in seeds]
+    while any(alive):
+        chosen = [i for i in range(count) if alive[i]]
+        forces = _audit_forces(learner, [observations[i] for i in chosen], False)
+        for i, force in zip(chosen, forces):
+            obs, _, terminated, truncated, info = rollout[i].step(force)
+            stochastic_lengths[i] += 1
+            stochastic_infos[i] = info
+            if terminated or truncated:
+                alive[i] = False
+            else:
+                observations[i] = np.asarray(obs, dtype=np.float32)
+    stochastic_successes = [bool(info.get("success", False)) for info in stochastic_infos]
     stored = len(learner.memory)
     stride = max(1, stored // 4096)
     picked = learner.memory.states[0:stored:stride][:4096].detach().cpu().numpy()
@@ -4489,6 +4521,7 @@ def _scaled_audit(name, learner, gain, counted, successes, durations):
         if getattr(learner, "min_log_alpha", None) is not None and learner.alpha_steps:
             alpha_note += f"floor {int(learner.alpha_floor_hits)}/{learner.alpha_steps} "
     spread_note = ""
+    gaussian = bool(pre_means)
     if gaussian:
         spread_note = (
             f"pre-tanh |mean| {np.median(pre_means):.3f} pre-tanh std {np.median(pre_stds):.3f} "

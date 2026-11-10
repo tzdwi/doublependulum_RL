@@ -187,15 +187,30 @@ def run_parallel(learner, num_episodes, start_episode, choose_actions, on_step, 
         learner.vec = None
 
 
-def _policy_force(learner, state):
+def _policy_kwargs(learner):
     kwargs = {"do_deterministic": True}
     # BRO trains the optimistic mean. The video shows that mean, without action noise.
     if getattr(learner, "video_prefix", "") == "bro":
         kwargs["do_optimistic"] = True
-    action = learner.select_action(state, **kwargs)
+    return kwargs
+
+
+def _policy_force(learner, state):
+    return _policy_forces(learner, [state])[0]
+
+
+def _policy_forces(learner, states):
+    """One deterministic force per state, from a single policy call."""
+    action = learner.select_action(torch.cat(states, dim=0), **_policy_kwargs(learner))
     if isinstance(action, tuple):
         action = action[0]
-    return _as_float(action)
+    return [float(action.reshape(-1)[i]) for i in range(len(states))]
+
+
+def _frame_steps(repeat, frames):
+    """Physics-step indexes that get a video frame. The default keeps every step."""
+    frames = max(1, min(int(frames), repeat))
+    return {min(repeat - 1, int(round((k + 1) * repeat / frames)) - 1) for k in range(frames)}
 
 
 def _video_env_kwargs(env):
@@ -240,36 +255,37 @@ def _critic_value(learner, state, force):
         return float(torch.min(learner.Q_net_1(q_in), learner.Q_net_2(q_in)))
 
 
-def _write_decision(writer, learner, envs, states, active, canvas, overlay, forces=None):
-    """Hold one force and write a frame after every physics step."""
+def _write_decision(writer, learner, envs, states, active, canvas, overlay, forces=None, frame_steps=None):
+    """Hold one force and write the requested frames of that decision."""
+    chosen = [i for i in range(len(envs)) if active[i]]
+    if not chosen:
+        return
+    held = _policy_forces(learner, [states[i] for i in chosen])
     running = []
-    for i, env in enumerate(envs):
-        if not active[i]:
-            continue
-        plant = env.unwrapped
-        force = _policy_force(learner, states[i])
+    for i, force in zip(chosen, held):
+        plant = envs[i].unwrapped
         plant.hold_force(force)
         if forces is not None:
             forces.append(force)
         running.append((i, plant, []))
-    if not running:
-        return
     repeat = running[0][1].action_repeat
+    if frame_steps is None:
+        frame_steps = set(range(repeat))
     shots = []
-    for _ in range(repeat):
+    for step in range(repeat):
         shown = []
         for i, plant, infos in running:
             if not active[i]:
                 continue
             infos.append(plant._physics_step())
             shown.append(plant)
-            if not overlay:
+            if not overlay and step in frame_steps:
                 shots.append(np.array(plant.pendulum.x, copy=True))
             if infos[-1]["failure_penalty"]:
                 active[i] = False
         if not shown:
             break
-        if overlay:
+        if overlay and step in frame_steps:
             writer.append_data(canvas.render_many(shown))
         if all(not active[i] for i, _, _ in running):
             break
@@ -302,18 +318,23 @@ def record_policy_video(learner, seeds, episode_number):
     for env, seed in zip(envs, seeds):
         observation, _ = env.reset(seed=int(seed))
         states.append(_as_state(observation))
-    start_values = [_critic_value(learner, state, _policy_force(learner, state)) for state in states]
+    opening = _policy_forces(learner, states)
+    start_values = [_critic_value(learner, state, force) for state, force in zip(states, opening)]
     forces = []
     active = [True] * len(envs)
     limit = int(envs[0].spec.max_episode_steps)
     os.makedirs(vid_dir, exist_ok=True)
     path = os.path.join(vid_dir, name)
-    # One frame is one integrator step of dt, so playback stays in real time.
-    writer = imageio.get_writer(path, fps=int(round(1.0 / canvas.dt)))
+    # The default writes every integrator step, so playback stays in real time.
+    # frames_per_decision can keep fewer frames; one frame per decision is 20 fps.
+    repeat = canvas.action_repeat
+    frames = int(getattr(learner, "frames_per_decision", repeat))
+    frame_steps = _frame_steps(repeat, frames)
+    writer = imageio.get_writer(path, fps=int(round(len(frame_steps) / (canvas.dt * repeat))))
     try:
         decisions = 0
         while any(active) and decisions < limit:
-            _write_decision(writer, learner, envs, states, active, canvas, overlay, forces)
+            _write_decision(writer, learner, envs, states, active, canvas, overlay, forces, frame_steps)
             decisions += 1
     finally:
         writer.close()

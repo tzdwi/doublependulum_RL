@@ -395,36 +395,31 @@ class DoublePendulumEnv(gym.Env):
             )
 
     def render_many(self, plants, alpha=80):
-        """Draw the track once and each plant's cart and poles on the same frame."""
+        """Draw the track once and each plant's cart and poles on the same frame.
+
+        Each plant is blended only inside the box it drew in. That matches blending
+        the whole frame, because the rest of a plant's layer is blank.
+        """
         try:
             import pygame
         except ImportError as e:
             raise DependencyNotInstalled(
                 'pygame is not installed, run `pip install "gymnasium[classic-control]"`'
             ) from e
+        width = self.SCREEN_DIM
         if self.screen is None:
             pygame.display.init()
-            self.screen = pygame.Surface((self.SCREEN_DIM, self.SCREEN_DIM))
+            self.screen = pygame.Surface((width, width))
 
         bound = self.l1 + self.l2 + 0.2 + self.size
-        scale = self.SCREEN_DIM / (bound * 2)
-        offset = self.SCREEN_DIM / 2
-
-        def blank():
-            surf = pygame.Surface((self.SCREEN_DIM, self.SCREEN_DIM))
-            surf.fill((255, 255, 255))
-            return surf
-
-        def pixels(surf):
-            return np.flipud(np.transpose(np.array(pygame.surfarray.pixels3d(surf)), axes=(1, 0, 2)))
+        scale = width / (bound * 2)
+        offset = width / 2
 
         def draw_body(surf, plant):
             cartesian = plant.pendulum.transform_cartesian()
             p0 = (cartesian[0] * scale + offset, offset)
             p1 = (cartesian[1][0] * scale + offset, cartesian[1][1] * scale + offset)
             p2 = (cartesian[2][0] * scale + offset, cartesian[2][1] * scale + offset)
-            pygame.draw.line(surf, (0, 0, 0), p0, p1)
-            pygame.draw.line(surf, (0, 0, 0), p1, p2)
             cart_size = 0.05 * self.size * scale
             ball_size = max(1, int(0.025 * self.size * scale))
             corners = [
@@ -433,26 +428,39 @@ class DoublePendulumEnv(gym.Env):
                 (p0[0] + cart_size, p0[1] + cart_size),
                 (p0[0] + cart_size, p0[1] - cart_size),
             ]
-            pygame.draw.polygon(surf, (0, 0, 0), corners)
-            pygame.draw.polygon(surf, (204, 0, 0), corners, 1)
+            rects = [
+                pygame.draw.line(surf, (0, 0, 0), p0, p1),
+                pygame.draw.line(surf, (0, 0, 0), p1, p2),
+                pygame.draw.polygon(surf, (0, 0, 0), corners),
+                pygame.draw.polygon(surf, (204, 0, 0), corners, 1),
+            ]
             for point in (p1, p2):
-                pygame.draw.circle(surf, (204, 204, 0), (int(point[0]), int(point[1])), ball_size)
+                rects.append(pygame.draw.circle(
+                    surf, (204, 204, 0), (int(point[0]), int(point[1])), ball_size))
+            return rects[0].unionall(rects[1:]).clip(surf.get_rect())
 
-        base = blank()
+        base = pygame.Surface((width, width))
+        base.fill((255, 255, 255))
         pygame.draw.line(
-            base,
-            (0, 0, 0),
+            base, (0, 0, 0),
             (-self.size * scale + offset, offset),
             (self.size * scale + offset, offset),
         )
-        acc = pixels(base).astype(np.float32)
+        acc = np.flipud(np.transpose(np.array(pygame.surfarray.pixels3d(base)), axes=(1, 0, 2))).astype(np.float32)
         blend = alpha / 255.0
+        layer = pygame.Surface((width, width))
         for plant in plants:
-            layer = blank()
-            draw_body(layer, plant)
-            image = pixels(layer).astype(np.float32)
-            mask = np.any(image < 250, axis=-1, keepdims=True)
-            acc = np.where(mask, acc * (1.0 - blend) + image * blend, acc)
+            layer.fill((255, 255, 255))
+            box = draw_body(layer, plant)
+            if box.width == 0 or box.height == 0:
+                continue
+            # Surface y grows down from the top. The image is flipped, so the crop's rows run the other way.
+            image = np.flipud(np.transpose(
+                pygame.surfarray.pixels3d(layer)[box.left:box.right, box.top:box.bottom], axes=(1, 0, 2),
+            )).astype(np.float32)
+            window = acc[width - box.bottom:width - box.top, box.left:box.right]
+            mask = np.any(image < 250, axis=-1)
+            window[mask] = window[mask] * (1.0 - blend) + image[mask] * blend
         return acc.astype(np.uint8)
 
     def close(self):
