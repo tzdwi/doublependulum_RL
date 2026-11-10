@@ -7,8 +7,11 @@ Run it once per terminal, so each learner has its own Cursor terminal:
     python scripts/diagnose_stillness.py crossq
 
 An optional second argument is the episode count (default 8000).
+An optional third argument is the training seed (default 0). It changes the
+network's starting weights and the exploration noise. Held-out seeds stay 100-119.
 
-DDPG and CrossQ use their training defaults. SAC learns its temperature,
+DDPG keeps 0.999 of its target each update and decays the critic weights by 1e-3.
+CrossQ uses its training defaults. SAC learns its temperature,
 starting at 0.01 with a target near 2.11 nats, and keeps a replay of 2M.
 A held-out check on seeds 100-119 runs every 100 episodes and prints one short
 line. Three perfect checks in a row stop the run. Nothing is written to the
@@ -32,14 +35,7 @@ import torch
 
 import diagnose_learning as diag
 
-LEARNERS = ("ddpg", "ddpg-twin", "ddpg-td3", "sac", "crossq")
-
-# Diagnostic variants only. Plain "ddpg" stays the paper algorithm.
-DDPG_VARIANTS = {
-    "ddpg": {},
-    "ddpg-twin": {"twin_critic": True},
-    "ddpg-td3": {"twin_critic": True, "target_noise": 0.2, "target_noise_clip": 0.5},
-}
+LEARNERS = ("ddpg", "sac", "crossq")
 
 
 def short_line(line):
@@ -54,12 +50,14 @@ def short_line(line):
         found = re.search(pattern, line)
         return found.group(1) if found else "?"
 
+    alpha = re.search(r"\balpha ([\d.]+)", line)
+    alpha_text = f" | alpha {alpha.group(1)}" if alpha else ""
     return (
         f"{head.group(1)} ep {head.group(2)} | train {head.group(3)} | "
         f"held-out {find(r'holdout (\d+/20)')} len {find(r'holdout \d+/20 median length (\d+)')} "
         f"stoch {find(r'stochastic (\d+/20)')} | longest hold {find(r'longest hold ([\d.]+)s')}s "
         f"| speed/limit {find(r'upright speed/limit ([\d.]+)')} | opening |F| {find(r'opening \|F\| ([\d.]+)')} "
-        f"| Q {find(r'median Q (-?[\d.]+)')} | streak {find(r'streak (\d+)')} "
+        f"| Q {find(r'median Q (-?[\d.]+)')}{alpha_text} | streak {find(r'streak (\d+)')} "
         f"| toward LQR {find(r'toward LQR (\d+/20)')}"
     )
 
@@ -87,7 +85,7 @@ class ShortLines:
         return getattr(self.stream, name)
 
 
-def ddpg_probe(name, counted, learner, gain):
+def ddpg_probe(name, counted, learner, gain, run_seed):
     """Every 500 episodes: how saturated the actor and replay are, and how the critic scores forces."""
     if counted % 500:
         return
@@ -135,21 +133,19 @@ def ddpg_probe(name, counted, learner, gain):
         flush=True,
     )
     snapshot = {"policy": learner.policy_net.state_dict(), "critic": learner.Q_net.state_dict()}
-    if learner.twin_critic:
-        snapshot["critic_2"] = learner.Q_net_2.state_dict()
-    torch.save(snapshot, f"/tmp/stillness_{name.replace('-', '_')}_ep{counted}.pt")
+    torch.save(snapshot, f"/tmp/stillness_{name.replace('-', '_')}_s{run_seed}_ep{counted}.pt")
 
 
-def run_one(name, episodes):
+def run_one(name, episodes, seed):
     sys.stdout = ShortLines(sys.stdout)
     env = diag.init_env()
     gain = diag.discrete_lqr(env.unwrapped)
-    print(f"{name}: value ceiling for this reward is 1.0", flush=True)
-    if name in DDPG_VARIANTS:
+    print(f"{name} seed {seed}: value ceiling for this reward is 1.0", flush=True)
+    if name == "ddpg":
         diag.ddpg_scaled_run(
-            env, gain, label=f"stillness {name}", num_episodes=episodes,
-            on_audit=lambda counted, audit, learner: ddpg_probe(name, counted, learner, gain),
-            learner_kwargs=DDPG_VARIANTS[name],
+            env, gain, label=f"stillness {name} seed {seed}", num_episodes=episodes,
+            on_audit=lambda counted, audit, learner: ddpg_probe(name, counted, learner, gain, seed),
+            training_seed=seed,
         )
     elif name == "sac":
         diag.speed_penalty_run(
@@ -163,9 +159,10 @@ def run_one(name, episodes):
 def main():
     args = sys.argv[1:]
     if not args or args[0] not in LEARNERS:
-        raise SystemExit("usage: diagnose_stillness.py " + "|".join(LEARNERS) + " [episodes]")
+        raise SystemExit("usage: diagnose_stillness.py " + "|".join(LEARNERS) + " [episodes] [seed]")
     episodes = int(args[1]) if len(args) > 1 else 8000
-    run_one(args[0], episodes)
+    seed = int(args[2]) if len(args) > 2 else 0
+    run_one(args[0], episodes, seed)
 
 
 if __name__ == "__main__":

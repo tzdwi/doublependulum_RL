@@ -103,7 +103,7 @@ class CQ_Q_DP(nn.Module):
     Our goal is to learn a function Q*(s, a) to estimate the reward of
     acting optimally on the state s.
     """
-    def __init__(self, n_observations):
+    def __init__(self, n_observations, renorm_warmup=5000):
         super(CQ_Q_DP, self).__init__()
         # we want the input to be n_observations+1
         # but the input will be double the batch size
@@ -115,23 +115,28 @@ class CQ_Q_DP(nn.Module):
         self.norm1 = BatchRenorm1d(
             num_features=1024,
             momentum=0.01, #equiv to 0.99 in CrossQ paper
-            eps=0.001
+            eps=0.001,
+            warmup_steps=renorm_warmup,
             )
         self.layer2 = nn.Linear(1024, 1024)
         self.norm2 = BatchRenorm1d(
             num_features=1024,
             momentum=0.01, #equiv to 0.99 in CrossQ paper
-            eps=0.001
+            eps=0.001,
+            warmup_steps=renorm_warmup,
             )
         self.layer3 = nn.Linear(1024, 1)
         self.activation = nn.ReLU()
+        # The learner sets this to reward_scale. The raw layer then trains at the
+        # paper's value size, while every caller still sees units where 1 is perfect.
+        self.output_scale = 1.0
 
     # Called with either one element to determine next action's reward
     # or a batch during optimization. Returns tensor([[reward]...]).
     def forward(self, x):
         x = self.activation(self.norm1(self.layer1(x)))
         x = self.activation(self.norm2(self.layer2(x)))
-        return self.layer3(x)
+        return self.layer3(x) * (1.0 / self.output_scale)
 
 
 class CrossQ_Learner:
@@ -158,7 +163,9 @@ class CrossQ_Learner:
                  obs_center=None,
                  obs_spread=None,
                  adam_betas=(0.5, 0.999),
-                 num_envs=1):
+                 num_envs=1,
+                 renorm_warmup=5000):
+        # renorm_warmup counts train-mode critic forwards that stay plain batch norm.
 
         self.env = init_env(size=size,
                             max_F=max_F,
@@ -220,8 +227,10 @@ class CrossQ_Learner:
         
         # Nets to predict the reward for the next action, which we take the minimum of
         # otherwise the policy just learns any faults in the one Q net
-        self.Q_net_1 = CQ_Q_DP(n_observations).to(device)
-        self.Q_net_2 = CQ_Q_DP(n_observations).to(device)
+        self.Q_net_1 = CQ_Q_DP(n_observations, renorm_warmup=renorm_warmup).to(device)
+        self.Q_net_2 = CQ_Q_DP(n_observations, renorm_warmup=renorm_warmup).to(device)
+        self.Q_net_1.output_scale = self.reward_scale
+        self.Q_net_2.output_scale = self.reward_scale
         # NOTE, no target nets in CrossQ!
         
         # Optimizers use LR=10^-3 by default
@@ -398,7 +407,6 @@ class CrossQ_Learner:
                         module.ra_mean.copy_(mean)
                         module.ra_var.copy_(var)
                         module.steps.copy_(steps)
-        torch.cuda.empty_cache()
 
     def _actor_started(self):
         return self.steps_done > self.start_steps + self.actor_holdback

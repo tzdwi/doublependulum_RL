@@ -21,8 +21,6 @@ DDPG_policy_pickle = this_dir+"/pickles/ddpg_policy_net.pt"
 DDPG_Q_pickle = this_dir+"/pickles/ddpg_q_net.pt"
 DDPG_policy_best_pickle = this_dir+"/pickles/ddpg_policy_net_best.pt"
 DDPG_Q_best_pickle = this_dir+"/pickles/ddpg_q_net_best.pt"
-DDPG_Q2_pickle = this_dir+"/pickles/ddpg_q2_net.pt"
-DDPG_Q2_best_pickle = this_dir+"/pickles/ddpg_q2_net_best.pt"
 
 DDPG_EPISODE_DURATION_FIG = plot_dir+"/ddpg_episode_duration.png"
 DDPG_CUM_REWARDS_FIG = plot_dir+"/ddpg_cum_rewards.png"
@@ -89,7 +87,7 @@ class DDPG_Learner:
                  theta_tol=np.pi/10,
                  batch_size=256,
                  gamma=0.99,
-                 tau=0.995,
+                 tau=0.999,
                  learning_rate=3e-4,
                  policy_delay=2,
                  actor_holdback=0,
@@ -99,11 +97,9 @@ class DDPG_Learner:
                  obs_center=None,
                  obs_spread=None,
                  num_envs=1,
-                 twin_critic=False,
-                 target_noise=0.0,
-                 target_noise_clip=0.0):
-        # twin_critic and target_noise are TD3 additions, off by default so this stays DDPG.
-        # Both noise settings are fractions of the maximum force.
+                 critic_weight_decay=1e-3):
+        # tau is the fraction of the old target kept each update, so 0.999 is a 1e-3 mix.
+        # critic_weight_decay is AdamW decay on the critic only. The actor is not decayed.
 
         self.env = init_env(size=size,
                             max_F=max_F,
@@ -164,18 +160,9 @@ class DDPG_Learner:
         # target net initialized with same weights
         self.Q_target = DDPG_Q_DP(n_observations).to(device)
         self.Q_target.load_state_dict(self.Q_net.state_dict())
-        self.twin_critic = twin_critic
-        self.target_noise = target_noise
-        self.target_noise_clip = target_noise_clip
-        if twin_critic:
-            self.Q_net_2 = DDPG_Q_DP(n_observations).to(device)
-            self.Q_target_2 = DDPG_Q_DP(n_observations).to(device)
-            self.Q_target_2.load_state_dict(self.Q_net_2.state_dict())
-            self.Q_optimizer_2 = optim.AdamW(self.Q_net_2.parameters(),
-                                             lr=self.LR, amsgrad=True, weight_decay=0.0)
-        
+        self.critic_weight_decay = critic_weight_decay
         self.Q_optimizer = optim.AdamW(self.Q_net.parameters(),
-                                       lr=self.LR, amsgrad=True, weight_decay=0.0)
+                                       lr=self.LR, amsgrad=True, weight_decay=self.critic_weight_decay)
         self.policy_optimizer = optim.AdamW(self.policy_net.parameters(), 
                                             lr=self.LR, amsgrad=True, weight_decay=0.0)
         # Mean squared error loss
@@ -249,17 +236,11 @@ class DDPG_Learner:
                 # we're not updating the targets yet, so don't accumulate grads
                 next_action_values = self.policy_target(non_final_next_states)
                 scale = self.policy_net.scale
-                if self.target_noise > 0:
-                    noise = (self.target_noise * scale * torch.randn_like(next_action_values)).clamp(
-                        -self.target_noise_clip * scale, self.target_noise_clip * scale)
-                    next_action_values = (next_action_values + noise).clamp(-scale, scale)
                 # non_final_next_states is shape N_batch_nonfinal x n_observations
                 # next action values is shape N_batch_nonfinal x 1
                 # concatenate along final axis
                 target_input = torch.cat((non_final_next_states, next_action_values / scale), dim=-1)
                 next_values = self.Q_target(target_input)
-                if self.twin_critic:
-                    next_values = torch.minimum(next_values, self.Q_target_2(target_input))
                 next_state_values[non_final_mask] = self.GAMMA*next_values.squeeze(-1)
 
         targets = reward_batch+next_state_values
@@ -273,12 +254,6 @@ class DDPG_Learner:
         # In-place gradient clipping
         torch.nn.utils.clip_grad_norm_(self.Q_net.parameters(), 10)
         self.Q_optimizer.step()
-        if self.twin_critic:
-            loss_2 = self.criterion(self.Q_net_2(Q_in), targets.unsqueeze(1))
-            self.Q_optimizer_2.zero_grad()
-            loss_2.backward()
-            torch.nn.utils.clip_grad_norm_(self.Q_net_2.parameters(), 10)
-            self.Q_optimizer_2.step()
 
         if not do_policy_step:
             return
@@ -304,8 +279,6 @@ class DDPG_Learner:
 
     def _polyak_all(self):
         polyak_update(self.Q_net, self.Q_target, self.TAU)
-        if self.twin_critic:
-            polyak_update(self.Q_net_2, self.Q_target_2, self.TAU)
         polyak_update(self.policy_net, self.policy_target, self.TAU)
 
     def train(self, progress=False, make_plots=False, num_episodes = None, start_episode=0):
@@ -412,15 +385,11 @@ class DDPG_Learner:
         os.makedirs(os.path.dirname(DDPG_policy_pickle), exist_ok=True)
         save_checkpoint(self.policy_target.state_dict(), DDPG_policy_pickle)
         save_checkpoint(self.Q_target.state_dict(), DDPG_Q_pickle)
-        if self.twin_critic:
-            save_checkpoint(self.Q_target_2.state_dict(), DDPG_Q2_pickle)
 
     def dump_best(self, episode, holdout):
         os.makedirs(os.path.dirname(DDPG_policy_best_pickle), exist_ok=True)
         save_checkpoint(self.policy_target.state_dict(), DDPG_policy_best_pickle)
         save_checkpoint(self.Q_target.state_dict(), DDPG_Q_best_pickle)
-        if self.twin_critic:
-            save_checkpoint(self.Q_target_2.state_dict(), DDPG_Q2_best_pickle)
         print(f"saved best policy at episode {episode}, held-out {holdout}")
 
     def load(self, best=True):
@@ -431,9 +400,5 @@ class DDPG_Learner:
 
         self.policy_net.load_state_dict(self.policy_target.state_dict())
         self.Q_net.load_state_dict(self.Q_target.state_dict())
-        if self.twin_critic:
-            q2_path = DDPG_Q2_best_pickle if best else DDPG_Q2_pickle
-            self.Q_target_2.load_state_dict(load_checkpoint(q2_path, weights_only=True, map_location=device))
-            self.Q_net_2.load_state_dict(self.Q_target_2.state_dict())
 
 

@@ -3726,7 +3726,7 @@ def speed_penalty_run(env, gain, protected=False, adam_betas=None, archive_bc=Fa
         torch.cuda.empty_cache()
 
 
-def crossq_scaled_run(env, gain, learning_rate=None, adam_betas=None, label=None, num_episodes=8000):
+def crossq_scaled_run(env, gain, learning_rate=None, adam_betas=None, label=None, num_episodes=8000, renorm_warmup=None):
     """Train CrossQ with the derived reward scale and a 2 N entropy target."""
     from DoublePendulum.nn.crossQ import CrossQ_Learner
 
@@ -3742,7 +3742,8 @@ def crossq_scaled_run(env, gain, learning_rate=None, adam_betas=None, label=None
         f"entropy weight {learner.log_alpha.exp().item():.6f} "
         f"target entropy {learner.target_entropy:.3f} "
         f"learning rate {learner.LR:g} adam betas {learner.adam_betas[0]:g} {learner.adam_betas[1]:g} "
-        f"renorm warmup {learner.Q_net_1.norm1.warmup_steps}",
+        f"renorm warmup {learner.Q_net_1.norm1.warmup_steps} "
+        f"critic output x {1.0 / learner.Q_net_1.output_scale:g}",
         flush=True,
     )
     learner.dump_best = lambda *args, **kwargs: None
@@ -3768,17 +3769,17 @@ def crossq_scaled_run(env, gain, learning_rate=None, adam_betas=None, label=None
         torch.cuda.empty_cache()
 
 
-def ddpg_scaled_run(env, gain, label="scaled ddpg", num_episodes=8000, on_audit=None, learner_kwargs=None):
+def ddpg_scaled_run(env, gain, label="scaled ddpg", num_episodes=8000, on_audit=None, learner_kwargs=None, training_seed=0):
     """Train DDPG with reward scale 100 and audit its critic slope."""
     from DoublePendulum.nn.ddpg import DDPG_Learner
 
-    _reseed(0)
+    _reseed(training_seed)
     library_outcome.best = None
     learner = DDPG_Learner(**(learner_kwargs or {}))
     print("observation uses the environment scales", flush=True)
     print(
-        f"reward scale {learner.reward_scale:g} buffer {learner.memory.capacity} "
-        f"twin critic {learner.twin_critic} target noise {learner.target_noise:g} clip {learner.target_noise_clip:g}",
+        f"seed {training_seed} reward scale {learner.reward_scale:g} buffer {learner.memory.capacity} "
+        f"target keep {learner.TAU:g} critic weight decay {learner.critic_weight_decay:g}",
         flush=True,
     )
     learner.dump_best = lambda *args, **kwargs: None
