@@ -16,7 +16,7 @@ import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
 
-from .nn_common import save_checkpoint, load_checkpoint, this_dir, plot_dir, init_env, device, ReplayMemory, warmup_action, EarlyStop, polyak_update, prepare_parallel, run_parallel, _maybe_record, _record_final, _shift_training_seed
+from .nn_common import save_checkpoint, load_checkpoint, this_dir, plot_dir, init_env, device, ReplayMemory, uniform_warmup_action, EarlyStop, polyak_update, prepare_parallel, run_parallel, _maybe_record, _record_final, _shift_training_seed
 from .sac import SAC_Q_DP
 
 SAC_G_velocity_pickle = this_dir+"/pickles/sac_flowg_velocity_net.pt"
@@ -159,16 +159,16 @@ class SAC_FLOWG_Learner:
 				 l2=10.0, 
 				 dt=0.01, 
 				 theta_tol=np.pi/10,
-				 batch_size=128,
+				 batch_size=256,
 				 K=4,
 				 gamma=0.99,
 				 tau=0.995,
-				 alpha=0.03,
+				 alpha=None,
 				 learning_rate=3e-4,
 				 policy_delay=2,
-				 actor_holdback=20000,
-				 start_steps=2000,
-				 buffer_length=1e6,
+				 actor_holdback=0,
+				 start_steps=10000,
+				 buffer_length=2e6,
 				 log_progress=False,
 				 obs_center=None,
 				 obs_spread=None,
@@ -228,10 +228,14 @@ class SAC_FLOWG_Learner:
 		self.obs_spread = None if obs_spread is None else torch.as_tensor(obs_spread, dtype=torch.float32, device=device)
 		self.freeze_alpha = freeze_alpha
 
+		# The reward is divided by 1/(1-γ), so one perfect decision is worth 1-γ.
+		# Starting the temperature there makes one nat of entropy worth the same decision.
+		if alpha is None:
+			alpha = 1.0 - gamma
 		self.log_alpha = torch.tensor(math.log(alpha), device=device, requires_grad=True)
 		self.alpha_optimizer = optim.Adam([self.log_alpha], lr=self.LR)
-		# log probs are already scaled properly so this should just be 0
-		self.target_entropy = 0.0 
+		# Entropy of a Gaussian force with a standard deviation of 2 N.
+		self.target_entropy = 0.5 * math.log(2.0 * math.pi * math.e * 4.0) 
 
 		# Net to predict velocities to adapt proposed actions
 		self.velocity_net = SAC_FLOWG_VELOCITY(n_observations, n_actions).to(device)
@@ -277,7 +281,7 @@ class SAC_FLOWG_Learner:
 		actions from the environment
 		"""
 		if (self.steps_done < self.start_steps) and (not do_deterministic):
-			action = torch.as_tensor(warmup_action(self.env.action_space), device=device, dtype=torch.float32).view(1, 1)
+			action = torch.as_tensor(uniform_warmup_action(self.env.action_space), device=device, dtype=torch.float32).view(1, 1)
 			logp = None
 		else:
 			with torch.no_grad():

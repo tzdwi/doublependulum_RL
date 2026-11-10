@@ -3726,6 +3726,49 @@ def speed_penalty_run(env, gain, protected=False, adam_betas=None, archive_bc=Fa
         torch.cuda.empty_cache()
 
 
+def _flow_scaled_run(learner_cls, env, gain, label, num_episodes, training_seed):
+    """Train one flow learner with SAC's loop settings and audit every 100 episodes."""
+    _reseed(training_seed)
+    library_outcome.best = None
+    learner = learner_cls()
+    print(
+        f"seed {training_seed} batch {learner.BATCH_SIZE} buffer {learner.memory.capacity} "
+        f"warmup {learner.start_steps} holdback {learner.actor_holdback} "
+        f"alpha {float(learner.log_alpha.detach().exp()):.6f} target entropy {learner.target_entropy:.3f}",
+        flush=True,
+    )
+    learner.dump_best = lambda *args, **kwargs: None
+    _audited_train(learner, gain, label, num_episodes, 0, lambda *args: None)
+    successes = learner.final_state_balanced
+    print(
+        f"{label} finished episodes {len(learner.episode_durations)} "
+        f"steps {learner.steps_done} training successes {int(sum(successes))}/{len(successes)}",
+        flush=True,
+    )
+    best = library_outcome.best
+    actor = _actor_module(learner)
+    if best is not None:
+        current = {key: value.detach().cpu().clone() for key, value in actor.state_dict().items()}
+        actor.load_state_dict(best["policy"])
+        _preserved_rng(lambda: _scaled_audit(
+            f"{label} best", learner, gain, best["episode"], successes, learner.episode_durations,
+        ))
+        actor.load_state_dict(current)
+    del learner
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+
+def flowg_scaled_run(env, gain, label="stillness flowg", num_episodes=8000, training_seed=0):
+    from DoublePendulum.nn.sac_flowg import SAC_FLOWG_Learner
+    _flow_scaled_run(SAC_FLOWG_Learner, env, gain, label, num_episodes, training_seed)
+
+
+def flowt_scaled_run(env, gain, label="stillness flowt", num_episodes=8000, training_seed=0):
+    from DoublePendulum.nn.sac_flowt import SAC_FLOWT_Learner
+    _flow_scaled_run(SAC_FLOWT_Learner, env, gain, label, num_episodes, training_seed)
+
+
 def crossq_scaled_run(env, gain, learning_rate=None, adam_betas=None, label=None, num_episodes=8000, renorm_warmup=None):
     """Train CrossQ with the derived reward scale and a 2 N entropy target."""
     from DoublePendulum.nn.crossQ import CrossQ_Learner
@@ -3735,6 +3778,7 @@ def crossq_scaled_run(env, gain, learning_rate=None, adam_betas=None, label=None
     learner = CrossQ_Learner(
         **({} if learning_rate is None else {"learning_rate": learning_rate}),
         **({} if adam_betas is None else {"adam_betas": adam_betas}),
+        **({} if renorm_warmup is None else {"renorm_warmup": renorm_warmup}),
     )
     print("observation uses the environment scales", flush=True)
     print(
@@ -4313,6 +4357,14 @@ def library_outcome(name, builder=None, trace=False, gain=None):
         learner.policy_net.load_state_dict(current)
 
 
+def _actor_module(learner):
+    return learner.velocity_net if hasattr(learner, "velocity_net") else learner.policy_net
+
+
+def _as_action(action):
+    return action[0] if isinstance(action, tuple) else action
+
+
 def _scaled_audit(name, learner, gain, counted, successes, durations):
     probe = init_env()
     limit = float(probe.unwrapped.max_F)
@@ -4329,10 +4381,13 @@ def _scaled_audit(name, learner, gain, counted, successes, durations):
         observation, _ = probe.reset(seed=seed)
         state = torch.tensor(observation, dtype=torch.float32, device=device).unsqueeze(0)
         with torch.no_grad():
-            action = learner.select_action(state, do_deterministic=True)
-            policy_out = learner.policy_net(learner._condition(state))
-            if gaussian is None:
-                gaussian = policy_out.shape[-1] == 2
+            action = _as_action(learner.select_action(state, do_deterministic=True))
+            if hasattr(learner, "policy_net"):
+                policy_out = learner.policy_net(learner._condition(state))
+                if gaussian is None:
+                    gaussian = policy_out.shape[-1] == 2
+            elif gaussian is None:
+                gaussian = False
             if gaussian:
                 mean, log_std = policy_out.chunk(2, dim=-1)
                 log_std = log_std.clamp(-20, 2)
@@ -4385,7 +4440,7 @@ def _scaled_audit(name, learner, gain, counted, successes, durations):
             if not done:
                 state = torch.tensor(observation, dtype=torch.float32, device=device).unsqueeze(0)
                 with torch.no_grad():
-                    action = learner.select_action(state, do_deterministic=True)
+                    action = _as_action(learner.select_action(state, do_deterministic=True))
         episode_successes.append(bool(info.get("success", False)))
         lengths.append(length)
         openings.append(opening)
@@ -4400,7 +4455,7 @@ def _scaled_audit(name, learner, gain, counted, successes, durations):
         while not done:
             state = torch.tensor(observation, dtype=torch.float32, device=device).unsqueeze(0)
             with torch.no_grad():
-                action = learner.select_action(state, do_deterministic=False)
+                action = _as_action(learner.select_action(state, do_deterministic=False))
             observation, _, terminated, truncated, info = probe.step(float(action))
             length += 1
             done = terminated or truncated
@@ -4421,7 +4476,7 @@ def _scaled_audit(name, learner, gain, counted, successes, durations):
         library_outcome.best = {
             "episode": counted,
             "score": score,
-            "policy": {key: value.detach().cpu().clone() for key, value in learner.policy_net.state_dict().items()},
+            "policy": {key: value.detach().cpu().clone() for key, value in _actor_module(learner).state_dict().items()},
         }
         print(f"{name} kept policy at episode {counted}", flush=True)
     narrow = int(np.sum(tilts < 0.01))

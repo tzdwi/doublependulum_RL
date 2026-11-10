@@ -5,10 +5,14 @@ Run it once per terminal, so each learner has its own Cursor terminal:
     python scripts/diagnose_stillness.py ddpg
     python scripts/diagnose_stillness.py sac
     python scripts/diagnose_stillness.py crossq
+    python scripts/diagnose_stillness.py flowg
+    python scripts/diagnose_stillness.py flowt
 
 An optional second argument is the episode count (default 8000).
 An optional third argument is the training seed (default 0). It changes the
 network's starting weights and the exploration noise. Held-out seeds stay 100-119.
+An optional fourth argument is the CrossQ batch-renormalization warmup. It counts
+train-mode critic forwards. The default is 5000.
 
 DDPG keeps 0.999 of its target each update and decays the critic weights by 1e-3.
 CrossQ uses its training defaults. SAC learns its temperature,
@@ -35,7 +39,7 @@ import torch
 
 import diagnose_learning as diag
 
-LEARNERS = ("ddpg", "sac", "crossq")
+LEARNERS = ("ddpg", "sac", "crossq", "flowg", "flowt")
 
 
 def short_line(line):
@@ -136,7 +140,7 @@ def ddpg_probe(name, counted, learner, gain, run_seed):
     torch.save(snapshot, f"/tmp/stillness_{name.replace('-', '_')}_s{run_seed}_ep{counted}.pt")
 
 
-def run_one(name, episodes, seed):
+def run_one(name, episodes, seed, renorm_warmup=None):
     sys.stdout = ShortLines(sys.stdout)
     env = diag.init_env()
     gain = diag.discrete_lqr(env.unwrapped)
@@ -147,22 +151,33 @@ def run_one(name, episodes, seed):
             on_audit=lambda counted, audit, learner: ddpg_probe(name, counted, learner, gain, seed),
             training_seed=seed,
         )
+    elif name == "flowg":
+        diag.flowg_scaled_run(
+            env, gain, label=f"stillness flowg seed {seed}", num_episodes=episodes, training_seed=seed,
+        )
+    elif name == "flowt":
+        diag.flowt_scaled_run(
+            env, gain, label=f"stillness flowt seed {seed}", num_episodes=episodes, training_seed=seed,
+        )
     elif name == "sac":
         diag.speed_penalty_run(
             env, gain, freeze_alpha=False,
             num_episodes=episodes, run_label="stillness sac",
         )
     else:
-        diag.crossq_scaled_run(env, gain, label="stillness crossq", num_episodes=episodes)
+        diag.crossq_scaled_run(
+            env, gain, label="stillness crossq", num_episodes=episodes, renorm_warmup=renorm_warmup,
+        )
 
 
 def main():
     args = sys.argv[1:]
     if not args or args[0] not in LEARNERS:
-        raise SystemExit("usage: diagnose_stillness.py " + "|".join(LEARNERS) + " [episodes] [seed]")
+        raise SystemExit("usage: diagnose_stillness.py " + "|".join(LEARNERS) + " [episodes] [seed] [renorm_warmup]")
     episodes = int(args[1]) if len(args) > 1 else 8000
     seed = int(args[2]) if len(args) > 2 else 0
-    run_one(args[0], episodes, seed)
+    renorm_warmup = int(args[3]) if len(args) > 3 else None
+    run_one(args[0], episodes, seed, renorm_warmup)
 
 
 if __name__ == "__main__":
