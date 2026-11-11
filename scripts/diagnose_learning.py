@@ -4527,6 +4527,23 @@ def _scaled_audit(name, learner, gain, counted, successes, durations):
             f"pre-tanh |mean| {np.median(pre_means):.3f} pre-tanh std {np.median(pre_stds):.3f} "
             f"force std {np.median(force_stds):.3f} "
         )
+    flow_note = ""
+    flow = getattr(learner, "velocity_net", None)
+    if flow is not None and len(picked):
+        with torch.no_grad():
+            states = learner._condition(torch.as_tensor(picked, device=device))
+            forces, logp = flow.sample(states, learner.K, scale)
+            zero = torch.zeros(len(states), 1, device=device)
+            start = torch.zeros(len(states), device=device)
+            _, log_std = flow(states, zero, start)
+            flow_note = (
+                f"at rail {float((forces.abs() >= 0.99 * scale).float().mean()):.2f} "
+                f"sigma {float(log_std.exp().median()):.3f} entropy est {float(-logp.mean()):.2f} "
+            )
+            if hasattr(flow, "gate_layer1"):
+                x = torch.cat((states, zero, flow.time_emb(start)), dim=-1)
+                gate = torch.sigmoid(flow.gate_layer2(flow.activation(flow.gate_layer1(x))))
+                flow_note += f"gate {float(gate.mean()):.3f} "
     print(
         f"{name} episode {counted} steps {learner.steps_done} "
         f"training successes {int(sum(successes))}/{counted} "
@@ -4537,6 +4554,7 @@ def _scaled_audit(name, learner, gain, counted, successes, durations):
         f"stochastic {int(sum(stochastic_successes))}/20 median length {np.median(stochastic_lengths):.0f} "
         f"opening |F| {np.median(openings):.3f} "
         f"{spread_note}"
+        f"{flow_note}"
         f"upright fraction {np.median(upright_fractions):.3f} "
         f"upright speed/limit {np.nanmedian(upright_speeds):.3f} "
         f"stillness {np.median(speed_penalties):.3f} "

@@ -12,7 +12,7 @@ An optional second argument is the episode count (default 8000).
 An optional third argument is the training seed (default 0). It changes the
 network's starting weights and the exploration noise. Held-out seeds stay 100-119.
 An optional fourth argument is the CrossQ batch-renormalization warmup. It counts
-train-mode critic forwards. The default is 5000.
+each network's train-mode forwards. The default is 100000, as in the reference.
 
 DDPG keeps 0.999 of its target each update and decays the critic weights by 1e-3.
 CrossQ uses its training defaults. SAC learns its temperature,
@@ -56,6 +56,8 @@ def short_line(line):
 
     alpha = re.search(r"\balpha ([\d.]+)", line)
     alpha_text = f" | alpha {alpha.group(1)}" if alpha else ""
+    flow = re.search(r"(at rail [\d.]+ sigma [\d.]+ entropy est -?[\d.]+(?: gate [\d.]+)?)", line)
+    alpha_text += f" | {flow.group(1)}" if flow else ""
     return (
         f"{head.group(1)} ep {head.group(2)} | train {head.group(3)} | "
         f"held-out {find(r'holdout (\d+/20)')} len {find(r'holdout \d+/20 median length (\d+)')} "

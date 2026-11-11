@@ -208,7 +208,7 @@ def _policy_forces(learner, states):
 
 
 def _frame_steps(repeat, frames):
-    """Physics-step indexes that get a video frame. The default keeps every step."""
+    """Physics-step indexes that get a video frame. One frame is the last step of the decision."""
     frames = max(1, min(int(frames), repeat))
     return {min(repeat - 1, int(round((k + 1) * repeat / frames)) - 1) for k in range(frames)}
 
@@ -305,7 +305,7 @@ def _write_decision(writer, learner, envs, states, active, canvas, overlay, forc
 
 
 def record_policy_video(learner, seeds, episode_number):
-    """Roll deterministic held-out seeds and save one frame per physics step."""
+    """Roll deterministic held-out seeds and save one frame per decision."""
     canvas = learner.log_env.unwrapped
     overlay = len(seeds) > 1
     if overlay:
@@ -325,10 +325,10 @@ def record_policy_video(learner, seeds, episode_number):
     limit = int(envs[0].spec.max_episode_steps)
     os.makedirs(vid_dir, exist_ok=True)
     path = os.path.join(vid_dir, name)
-    # The default writes every integrator step, so playback stays in real time.
-    # frames_per_decision can keep fewer frames; one frame per decision is 20 fps.
+    # One frame per decision plays back in real time at 20 fps.
+    # frames_per_decision can keep more frames, up to one per physics step.
     repeat = canvas.action_repeat
-    frames = int(getattr(learner, "frames_per_decision", repeat))
+    frames = int(getattr(learner, "frames_per_decision", 1))
     frame_steps = _frame_steps(repeat, frames)
     writer = imageio.get_writer(path, fps=int(round(len(frame_steps) / (canvas.dt * repeat))))
     try:

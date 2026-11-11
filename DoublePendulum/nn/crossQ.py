@@ -37,10 +37,14 @@ class CQ_POLICY_DP(nn.Module):
     are a mean action, and a (log) standard deviation. Note, unlike
     DDPG, we are going to squash the output downstream, so no tanh constraint.
     """
-    def __init__(self, n_observations,):
+    def __init__(self, n_observations, renorm_warmup=100000):
         super(CQ_POLICY_DP, self).__init__()
+        # Same layout as the reference actor: renorm on the input and after each ReLU.
+        self.norm0 = BatchRenorm1d(n_observations, warmup_steps=renorm_warmup)
         self.layer1 = nn.Linear(n_observations, 256)
+        self.norm1 = BatchRenorm1d(256, warmup_steps=renorm_warmup)
         self.layer2 = nn.Linear(256, 256)
+        self.norm2 = BatchRenorm1d(256, warmup_steps=renorm_warmup)
         self.layer3 = nn.Linear(256, 2)
         nn.init.zeros_(self.layer3.weight)
         nn.init.zeros_(self.layer3.bias)
@@ -49,9 +53,11 @@ class CQ_POLICY_DP(nn.Module):
 
     # Called with either one element to determine next action, or a batch
     # during optimization. Returns tensor([[mean dF, log sigma dF]...]).
+    # Train mode needs a batch; the learner keeps this net in eval mode except in the actor update.
     def forward(self, x):
-        x = self.activation(self.layer1(x))
-        x = self.activation(self.layer2(x))
+        x = self.norm0(x)
+        x = self.norm1(self.activation(self.layer1(x)))
+        x = self.norm2(self.activation(self.layer2(x)))
         return self.layer3(x)
 
  
@@ -103,15 +109,21 @@ class CQ_Q_DP(nn.Module):
     Our goal is to learn a function Q*(s, a) to estimate the reward of
     acting optimally on the state s.
     """
-    def __init__(self, n_observations, renorm_warmup=5000):
+    def __init__(self, n_observations, renorm_warmup=100000):
         super(CQ_Q_DP, self).__init__()
         # we want the input to be n_observations+1
         # but the input will be double the batch size
         # so that the net sees both current state and next
         # state
+        # Same layout as the reference critic: renorm on the input and after each ReLU.
+        self.norm0 = BatchRenorm1d(
+            num_features=n_observations+1,
+            momentum=0.01,
+            eps=0.001,
+            warmup_steps=renorm_warmup,
+            )
         # We're also training a _wide_ network here!
         self.layer1 = nn.Linear(n_observations+1, 1024)
-        # We also add batch normalization between layers
         self.norm1 = BatchRenorm1d(
             num_features=1024,
             momentum=0.01, #equiv to 0.99 in CrossQ paper
@@ -134,8 +146,9 @@ class CQ_Q_DP(nn.Module):
     # Called with either one element to determine next action's reward
     # or a batch during optimization. Returns tensor([[reward]...]).
     def forward(self, x):
-        x = self.activation(self.norm1(self.layer1(x)))
-        x = self.activation(self.norm2(self.layer2(x)))
+        x = self.norm0(x)
+        x = self.norm1(self.activation(self.layer1(x)))
+        x = self.norm2(self.activation(self.layer2(x)))
         return self.layer3(x) * (1.0 / self.output_scale)
 
 
@@ -164,8 +177,8 @@ class CrossQ_Learner:
                  obs_spread=None,
                  adam_betas=(0.5, 0.999),
                  num_envs=1,
-                 renorm_warmup=5000):
-        # renorm_warmup counts train-mode critic forwards that stay plain batch norm.
+                 renorm_warmup=100000):
+        # renorm_warmup counts each network's train-mode forwards that stay plain batch norm.
 
         self.env = init_env(size=size,
                             max_F=max_F,
@@ -223,7 +236,8 @@ class CrossQ_Learner:
         self.target_entropy = 0.5 * math.log(2.0 * math.pi * math.e * 4.0)
 
         # Net to predict the next action
-        self.policy_net = CQ_POLICY_DP(n_observations).to(device)
+        self.policy_net = CQ_POLICY_DP(n_observations, renorm_warmup=renorm_warmup).to(device)
+        self.policy_net.eval()
         
         # Nets to predict the reward for the next action, which we take the minimum of
         # otherwise the policy just learns any faults in the one Q net
@@ -353,15 +367,11 @@ class CrossQ_Learner:
         self.Q_optimizer.step()
 
         if do_policy_step:
-            # After the warm-up, score the policy with the running averages from the critic update.
-            norms = [module for net in (self.Q_net_1, self.Q_net_2) for module in net.modules() if isinstance(module, BatchRenorm1d)]
-            warmed = all(int(module.steps) > module.warmup_steps for module in norms)
-            saved_stats = None
-            if warmed:
-                for module in norms:
-                    module.eval()
-            else:
-                saved_stats = [(module.ra_mean.clone(), module.ra_var.clone(), module.steps.clone()) for module in norms]
+            # As in the reference, the critic scores the actor with its running averages,
+            # while the actor's own renorm layers use the batch.
+            self.Q_net_1.eval()
+            self.Q_net_2.eval()
+            self.policy_net.train()
             try:
                 # Now gradient ascend the policy_net parameters
                 next_action_mus, next_action_logsigmas = self.policy_net(state_batch).chunk(2, dim=-1)
@@ -399,14 +409,9 @@ class CrossQ_Learner:
                 alpha_loss.backward()
                 self.alpha_optimizer.step()
             finally:
-                if warmed:
-                    for module in norms:
-                        module.train()
-                else:
-                    for module, (mean, var, steps) in zip(norms, saved_stats):
-                        module.ra_mean.copy_(mean)
-                        module.ra_var.copy_(var)
-                        module.steps.copy_(steps)
+                self.Q_net_1.train()
+                self.Q_net_2.train()
+                self.policy_net.eval()
 
     def _actor_started(self):
         return self.steps_done > self.start_steps + self.actor_holdback

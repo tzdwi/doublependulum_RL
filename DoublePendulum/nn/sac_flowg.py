@@ -84,10 +84,13 @@ class SAC_FLOWG_VELOCITY(nn.Module):
 		self.gate_layer1 = nn.Linear(n_observations+n_actions+t_emb_dim, d_hid)
 		self.gate_layer2 = nn.Linear(d_hid, n_actions)
 		nn.init.zeros_(self.gate_layer2.weight)
-		self.gate_layer2.bias.data[:] = 1.0
+		self.gate_layer2.bias.data[:] = 5.0
 
 		self.layer1 = nn.Linear(n_observations+n_actions+t_emb_dim, d_hid)
 		self.layer2 = nn.Linear(d_hid, n_actions)
+		# With the default init, 50*tanh(...) starts most actions at the force limit.
+		nn.init.zeros_(self.layer2.weight)
+		nn.init.zeros_(self.layer2.bias)
 
 		self.std_layer1 = nn.Linear(n_observations, d_hid)
 		self.std_layer2 = nn.Linear(d_hid, n_actions)
