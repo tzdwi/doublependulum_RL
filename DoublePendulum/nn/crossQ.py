@@ -122,22 +122,22 @@ class CQ_Q_DP(nn.Module):
             eps=0.001,
             warmup_steps=renorm_warmup,
             )
-        # We're also training a _wide_ network here!
-        self.layer1 = nn.Linear(n_observations+1, 1024)
+        # 2048 is the critic width in the paper's main experiments.
+        self.layer1 = nn.Linear(n_observations+1, 2048)
         self.norm1 = BatchRenorm1d(
-            num_features=1024,
+            num_features=2048,
             momentum=0.01, #equiv to 0.99 in CrossQ paper
             eps=0.001,
             warmup_steps=renorm_warmup,
             )
-        self.layer2 = nn.Linear(1024, 1024)
+        self.layer2 = nn.Linear(2048, 2048)
         self.norm2 = BatchRenorm1d(
-            num_features=1024,
+            num_features=2048,
             momentum=0.01, #equiv to 0.99 in CrossQ paper
             eps=0.001,
             warmup_steps=renorm_warmup,
             )
-        self.layer3 = nn.Linear(1024, 1)
+        self.layer3 = nn.Linear(2048, 1)
         self.activation = nn.ReLU()
         # The learner sets this to reward_scale. The raw layer then trains at the
         # paper's value size, while every caller still sees units where 1 is perfect.
