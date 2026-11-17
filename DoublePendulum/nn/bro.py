@@ -198,6 +198,7 @@ class BRO_Learner:
         # reset_steps count from when the actor first starts learning
         self.reset_steps = reset_steps
         self.reset_holdback = reset_holdback
+        self.reset_owed = False
         self.first_actor_step = self.start_steps + actor_holdback
         self.actor_start_step = self.first_actor_step
         
@@ -463,13 +464,28 @@ class BRO_Learner:
     def _actor_started(self):
         return self.steps_done > self.actor_start_step
 
+    def _maybe_reset(self):
+        # A passing policy keeps its weights. A reset that comes due during a passing
+        # streak is owed, and the next failed check fires that one reset.
+        since_actor = self.steps_done - self.first_actor_step
+        due = since_actor in self.reset_steps or (since_actor > 0 and since_actor % self.reset_steps[-1] == 0)
+        passing = getattr(self, "holdout_streak", 0) > 0
+        if due and passing:
+            self.reset_owed = True
+            print(f"reset owed at step {self.steps_done}, perfect checks in a row {self.holdout_streak}")
+            return
+        if not due and not (self.reset_owed and not passing):
+            return
+        if self.reset_owed and not due:
+            print(f"owed reset at step {self.steps_done}")
+        self.initialize_params()
+        self.actor_start_step = self.steps_done + self.reset_holdback
+        self.holdout_streak = 0
+        self.reset_owed = False
+
     def _parallel_update(self, step_index, early):
         if len(self.memory) > self.start_steps:
-            since_actor = self.steps_done - self.first_actor_step
-            if (since_actor in self.reset_steps) or ((since_actor > 0) and (since_actor % self.reset_steps[-1] == 0)):
-                self.initialize_params()
-                self.actor_start_step = self.steps_done + self.reset_holdback
-                self.holdout_streak = 0
+            self._maybe_reset()
             actor_ready = self.steps_done > self.actor_start_step
             for _ in range(self.replay_ratio):
                 self.optimize_model(do_policy_step=actor_ready)
@@ -523,13 +539,7 @@ class BRO_Learner:
                 state = next_state
 
                 if len(self.memory) > self.start_steps:
-                    since_actor = self.steps_done - self.first_actor_step
-                    if (since_actor in self.reset_steps) or ((since_actor > 0) and (since_actor % self.reset_steps[-1] == 0)):
-                        #reset
-                        self.initialize_params()
-                        self.actor_start_step = self.steps_done + self.reset_holdback
-                        self.holdout_streak = 0
-        
+                    self._maybe_reset()
                     actor_ready = self.steps_done > self.actor_start_step
                     for i in range(self.replay_ratio):
                         self.optimize_model(do_policy_step=actor_ready)

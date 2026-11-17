@@ -3745,11 +3745,16 @@ def _flow_scaled_run(learner_cls, env, gain, label, num_episodes, training_seed)
         f"steps {learner.steps_done} training successes {int(sum(successes))}/{len(successes)}",
         flush=True,
     )
-    best = library_outcome.best
     actor = _actor_module(learner)
+    _save_flow_snapshot(f"{label} final", len(learner.episode_durations), {
+        key: value.detach().cpu().clone() for key, value in actor.state_dict().items()
+    })
+    _preserved_rng(lambda: _flow_pair_report(learner, f"{label} final"))
+    best = library_outcome.best
     if best is not None:
         current = {key: value.detach().cpu().clone() for key, value in actor.state_dict().items()}
         actor.load_state_dict(best["policy"])
+        _preserved_rng(lambda: _flow_pair_report(learner, f"{label} best ep {best['episode']}"))
         _preserved_rng(lambda: _scaled_audit(
             f"{label} best", learner, gain, best["episode"], successes, learner.episode_durations,
         ))
@@ -4382,6 +4387,68 @@ def _audit_forces(learner, observations, deterministic):
     return [float(flat[i]) for i in range(len(observations))]
 
 
+def _fail_phrase(rows):
+    """One token per miss: seed, fall / left / never, upright speed over the limit, longest hold."""
+    parts = []
+    for seed, ok, fell, hold, speed in rows:
+        if ok:
+            continue
+        kind = "fall" if fell else ("left" if hold >= 5.0 else "never")
+        parts.append(f"{seed}:{kind}@{speed:.2f}/{hold:.1f}s")
+    return " ".join(parts) if parts else "none"
+
+
+def _roll_failures(learner, seeds, deterministic, wide):
+    """Roll one policy. wide uses the odd-episode training start and shove."""
+    probe = init_env()
+    still_limit = float(probe.unwrapped._still_speed)
+    tolerance = float(probe.unwrapped.theta_tol)
+    rows = []
+    for seed in seeds:
+        options = {"training": True} if wide else None
+        obs, _ = probe.reset(seed=int(seed), options=options)
+        speeds, hold, fell, info, done = [], 0.0, False, {}, False
+        while not done:
+            state = torch.tensor(obs, dtype=torch.float32, device=device).unsqueeze(0)
+            force = float(_as_action(learner.select_action(state, do_deterministic=deterministic)).reshape(-1)[0])
+            obs, _, terminated, truncated, info = probe.step(force)
+            plant = probe.unwrapped
+            physical = wrapped_error(plant.pendulum.x)
+            cartesian = plant.pendulum.transform_cartesian(do_vels=True)
+            speed = max(abs(cartesian[3]), float(np.hypot(*cartesian[4])), float(np.hypot(*cartesian[5])))
+            if float(np.max(np.abs(physical[1:3]))) < tolerance:
+                speeds.append(speed / still_limit)
+            hold = max(hold, plant.success_frames * plant.dt)
+            fell = bool(terminated)
+            done = terminated or truncated
+        rows.append((
+            int(seed), bool(info.get("success", False)), fell, hold,
+            float(np.median(speeds)) if speeds else float("nan"),
+        ))
+    return rows
+
+
+def _flow_pair_report(learner, tag):
+    """Deterministic and stochastic misses on the held-out seeds and on wide training starts."""
+    narrow = list(range(100, 120))
+    wide = list(range(201, 240, 2))
+    for mode, deterministic in (("det", True), ("stoch", False)):
+        print(
+            f"flow record {tag} {mode} "
+            f"narrow {_fail_phrase(_roll_failures(learner, narrow, deterministic, False))} | "
+            f"wide {_fail_phrase(_roll_failures(learner, wide, deterministic, True))}",
+            flush=True,
+        )
+
+
+def _save_flow_snapshot(name, episode, state):
+    slug = "flowg" if "flowg" in str(name) else "flowt"
+    directory = Path(__file__).parent / "logs"
+    directory.mkdir(exist_ok=True)
+    which = "final" if str(name).endswith(" final") else "best"
+    torch.save({"episode": int(episode), "velocity": state}, directory / f"{slug}_failmode_{which}.pt")
+
+
 def _scaled_audit(name, learner, gain, counted, successes, durations):
     probe = init_env()
     limit = float(probe.unwrapped.max_F)
@@ -4436,6 +4503,7 @@ def _scaled_audit(name, learner, gain, counted, successes, durations):
 
     count = len(seeds)
     alive = [True] * count
+    falls = [False] * count
     current = list(actions)
     lengths = [0] * count
     infos = [{} for _ in seeds]
@@ -4464,6 +4532,7 @@ def _scaled_audit(name, learner, gain, counted, successes, durations):
             holds[i] = max(holds[i], plant.success_frames * plant.dt)
             if terminated or truncated:
                 alive[i] = False
+                falls[i] = bool(terminated)
             else:
                 pending.append((i, np.asarray(obs, dtype=np.float32)))
         if pending:
@@ -4480,6 +4549,9 @@ def _scaled_audit(name, learner, gain, counted, successes, durations):
         observations[seeds.index(seed)] = np.asarray(obs, dtype=np.float32)
     alive = [True] * count
     stochastic_lengths = [0] * count
+    stochastic_falls = [False] * count
+    stochastic_holds = [0.0] * count
+    stochastic_speed_lists = [[] for _ in seeds]
     stochastic_infos = [{} for _ in seeds]
     while any(alive):
         chosen = [i for i in range(count) if alive[i]]
@@ -4488,8 +4560,16 @@ def _scaled_audit(name, learner, gain, counted, successes, durations):
             obs, _, terminated, truncated, info = rollout[i].step(force)
             stochastic_lengths[i] += 1
             stochastic_infos[i] = info
+            plant = rollout[i].unwrapped
+            physical = wrapped_error(plant.pendulum.x)
+            cartesian = plant.pendulum.transform_cartesian(do_vels=True)
+            speed = max(abs(cartesian[3]), float(np.hypot(*cartesian[4])), float(np.hypot(*cartesian[5])))
+            if float(np.max(np.abs(physical[1:3]))) < tolerance:
+                stochastic_speed_lists[i].append(speed / still_limit)
+            stochastic_holds[i] = max(stochastic_holds[i], plant.success_frames * plant.dt)
             if terminated or truncated:
                 alive[i] = False
+                stochastic_falls[i] = bool(terminated)
             else:
                 observations[i] = np.asarray(obs, dtype=np.float32)
     stochastic_successes = [bool(info.get("success", False)) for info in stochastic_infos]
@@ -4504,13 +4584,19 @@ def _scaled_audit(name, learner, gain, counted, successes, durations):
         learner.holdout_streak = (getattr(learner, "holdout_streak", 0) + 1) if holdout_successes == full else 0
     median_length = float(np.median(lengths))
     score = (holdout_successes, median_length)
-    if library_outcome.best is None or score > library_outcome.best["score"]:
+    previous = library_outcome.best
+    better = previous is None or score > previous["score"]
+    # A tied deterministic score keeps the later policy. The first 20/20 can be a transient.
+    tied = previous is not None and score == previous["score"] and hasattr(learner, "velocity_net")
+    if better or tied:
         library_outcome.best = {
             "episode": counted,
             "score": score,
             "policy": {key: value.detach().cpu().clone() for key, value in _actor_module(learner).state_dict().items()},
         }
         print(f"{name} kept policy at episode {counted}", flush=True)
+        if hasattr(learner, "velocity_net"):
+            _save_flow_snapshot(name, counted, library_outcome.best["policy"])
     narrow = int(np.sum(tilts < 0.01))
     wide = int(np.sum(tilts < 0.1))
     protected_count = getattr(learner.memory, "protected_count", None)
@@ -4565,6 +4651,14 @@ def _scaled_audit(name, learner, gain, counted, successes, durations):
         f"replay within 0.01 rad {narrow}/{len(tilts)} within 0.1 rad {wide}/{len(tilts)}",
         flush=True,
     )
+    if flow is not None:
+        stoch_speeds = [float(np.median(item)) if item else float("nan") for item in stochastic_speed_lists]
+        print(
+            f"flow fails ep {counted} "
+            f"det {_fail_phrase(zip(seeds, episode_successes, falls, holds, upright_speeds))} | "
+            f"stoch {_fail_phrase(zip(seeds, stochastic_successes, stochastic_falls, stochastic_holds, stoch_speeds))}",
+            flush=True,
+        )
     return {
         "successes": holdout_successes,
         "length": median_length,

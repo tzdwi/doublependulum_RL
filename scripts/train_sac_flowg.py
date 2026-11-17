@@ -21,7 +21,7 @@ def main():
     except Exception:
         print("Initializing with fresh weights")
 
-    learner.train(progress=True, make_plots=True, num_episodes=100000)
+    learner.train(progress=True, make_plots=True, num_episodes=8000)
     learner.dump()
 
 
