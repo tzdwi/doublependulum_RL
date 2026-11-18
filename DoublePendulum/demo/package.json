@@ -1,0 +1,11 @@
+{
+  "name": "doublependulum-demo",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test parity.test.mjs"
+  },
+  "devDependencies": {
+    "onnxruntime-node": "1.31.1"
+  }
+}

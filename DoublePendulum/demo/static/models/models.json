@@ -1,0 +1,65 @@
+{
+ "plant": {
+  "params": [
+   6.0,
+   100.0,
+   50.0,
+   10.0,
+   5.0,
+   50.0,
+   -10.0,
+   -5.0,
+   50.0,
+   98.10000000000001,
+   49.050000000000004
+  ],
+  "l1": 10.0,
+  "l2": 10.0,
+  "dt": 0.01,
+  "action_repeat": 5,
+  "max_F": 25.0,
+  "rail": 50,
+  "fall_angle": 0.8,
+  "theta_tol": 0.3141592653589793,
+  "still_speed": 0.33333333333333337,
+  "success_time": 5,
+  "obs_scales": [
+   50,
+   0.5,
+   0.5,
+   2.0,
+   0.5,
+   0.5,
+   1.0,
+   1.0
+  ],
+  "obs_clip": 5.0,
+  "checkpoint_version": "reward-v3 obs-v2 timing-dt0.01x5 scale-1/(1-gamma)"
+ },
+ "models": [
+  {
+   "id": "ddpg",
+   "label": "Deep Deterministic Policy Gradient",
+   "file": "models/ddpg.onnx",
+   "held_out": "20/20"
+  },
+  {
+   "id": "sac",
+   "label": "Soft Actor-Critic",
+   "file": "models/sac.onnx",
+   "held_out": "20/20"
+  },
+  {
+   "id": "sac_flowt",
+   "label": "SAC Flow (transformer)",
+   "file": "models/sac_flowt.onnx",
+   "held_out": "20/20"
+  },
+  {
+   "id": "sac_flowg",
+   "label": "SAC Flow (gated)",
+   "file": "models/sac_flowg.onnx",
+   "held_out": "20/20"
+  }
+ ]
+}
