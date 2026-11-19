@@ -23,6 +23,7 @@ os.environ["CUDA_VISIBLE_DEVICES"] = ""
 os.environ["PENDULUM_DEVICE"] = "cpu"
 
 import argparse
+import inspect
 import json
 import shutil
 from pathlib import Path
@@ -193,11 +194,15 @@ def main():
         closed_loop[model_id] = rows
 
         path = MODEL_DIR / f"{model_id}.onnx"
-        example = torch.zeros(1, 8)
-        torch.onnx.export(
-            policy, (example,), str(path), input_names=["obs"], output_names=["force"],
-            dynamic_axes={"obs": {0: "batch"}, "force": {0: "batch"}}, dynamo=False,
-        )
+        # dynamo=False keeps the legacy tracer, which is what the parity checks were written against.
+        # Older torch has only that tracer, and rejects the argument.
+        export_kwargs = {
+            "input_names": ["obs"], "output_names": ["force"],
+            "dynamic_axes": {"obs": {0: "batch"}, "force": {0: "batch"}},
+        }
+        if "dynamo" in inspect.signature(torch.onnx.export).parameters:
+            export_kwargs["dynamo"] = False
+        torch.onnx.export(policy, (torch.zeros(1, 8),), str(path), **export_kwargs)
 
         picks = rng.choice(len(seen), size=min(500, len(seen)), replace=False)
         observations = np.asarray([seen[i] for i in picks], dtype=np.float32)
