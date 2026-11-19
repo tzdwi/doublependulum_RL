@@ -17,7 +17,10 @@ Run from the repo root:
 import os
 
 # Export on the CPU, so the policies trace the same way the browser runs them.
+# Hiding CUDA is not enough: on a Mac the learners would otherwise pick MPS, and a
+# CPU observation into an MPS network fails with "Placeholder storage has not been allocated".
 os.environ["CUDA_VISIBLE_DEVICES"] = ""
+os.environ["PENDULUM_DEVICE"] = "cpu"
 
 import argparse
 import json
@@ -42,9 +45,9 @@ def _learners():
     return [
         ("ddpg", "Deep Deterministic Policy Gradient", ddpg.DDPG_Learner, ddpg.DDPG_policy_pickle),
         ("sac", "Soft Actor-Critic", sac.SAC_Learner, sac.SAC_policy_pickle),
-        ("sac_flowt", "SAC Flow (transformer)", sac_flowt.SAC_FLOWT_Learner, sac_flowt.SAC_T_velocity_pickle),
-        ("sac_flowg", "SAC Flow (gated)", sac_flowg.SAC_FLOWG_Learner, sac_flowg.SAC_G_velocity_pickle),
-        ("bro", "Bigger, Regularized, Optimistic", bro.BRO_Learner, bro.BRO_pessimistic_pickle),
+        ("sac_flowt", "SAC Flow (Transformer)", sac_flowt.SAC_FLOWT_Learner, sac_flowt.SAC_T_velocity_pickle),
+        ("sac_flowg", "SAC Flow (GRN)", sac_flowg.SAC_FLOWG_Learner, sac_flowg.SAC_G_velocity_pickle),
+        ("bro", "Bigger, Regularized, Optimistic (note: this model is slow)", bro.BRO_Learner, bro.BRO_pessimistic_pickle),
     ]
 
 

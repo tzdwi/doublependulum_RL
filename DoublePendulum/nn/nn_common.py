@@ -414,8 +414,11 @@ class EarlyStop:
             return f"solved: {holdout_streak} held-out checks in a row at {full}/{full}"
         return None
 
-# if GPU is to be used
+# Training uses a GPU when one is present. PENDULUM_DEVICE overrides that; the demo
+# export sets it to cpu so the traced policy matches the browser.
+_requested = os.environ.get("PENDULUM_DEVICE", "").strip()
 device = torch.device(
+    _requested if _requested else
     "cuda" if torch.cuda.is_available() else
     "mps" if torch.backends.mps.is_available() else
     "cpu"
