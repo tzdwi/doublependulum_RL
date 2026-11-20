@@ -51,14 +51,20 @@
   },
   {
    "id": "sac_flowt",
-   "label": "SAC Flow (transformer)",
+   "label": "SAC Flow (Transformer)",
    "file": "models/sac_flowt.onnx",
    "held_out": "20/20"
   },
   {
    "id": "sac_flowg",
-   "label": "SAC Flow (gated)",
+   "label": "SAC Flow (GRN)",
    "file": "models/sac_flowg.onnx",
+   "held_out": "20/20"
+  },
+  {
+   "id": "bro",
+   "label": "Bigger, Regularized, Optimistic (note: this model is slow)",
+   "file": "models/bro.onnx",
    "held_out": "20/20"
   }
  ]
